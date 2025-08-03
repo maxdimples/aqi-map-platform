@@ -1,0 +1,10 @@
+requests
+geopandas
+numpy
+shapely
+scipy
+folium
+pandas
+google-cloud-bigquery
+google-cloud-storage
+aiohttp

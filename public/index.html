@@ -1,0 +1,75 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>NYC Area Air Quality</title>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
+    <style>
+        body { margin: 0; padding: 0; font-family: sans-serif; }
+        #map { height: 100vh; width: 100vw; }
+        .leaflet-popup-content { width: 220px !important; }
+        .popup-line { margin: 2px 0; }
+    </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script>
+    const GCS_BUCKET_NAME = "your-unique-aqi-map-data-bucket-name"; // CHANGE to your bucket name
+    const DATA_URL = `https://storage.googleapis.com/${GCS_BUCKET_NAME}/map_data.json`;
+    
+    // Initialize the map centered on NYC
+    const map = L.map('map').setView([40.7128, -74.0060], 8);
+    
+    // Add a clean base map layer
+    L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
+        attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors © <a href="https://carto.com/attributions">CARTO</a>',
+        subdomains: 'abcd',
+        maxZoom: 20
+    }).addTo(map);
+
+    // Function to determine circle color based on AQI
+    function getColor(aqi) {
+        return aqi > 150 ? '#d73027' :
+               aqi > 100 ? '#fc8d59' :
+               aqi > 50  ? '#fee08b' :
+               aqi > 0   ? '#91cf60' :
+                           '#7f7f7f';
+    }
+
+    // Fetch data and populate the map
+    fetch(DATA_URL)
+        .then(response => response.json())
+        .then(data => {
+            console.log(`Loaded ${data.length} data points.`);
+            data.forEach(point => {
+                const medianAqi = Math.round(point.median_aqi);
+                if (isNaN(medianAqi)) return; // Don't plot points with null data
+
+                const popupContent = `
+                    <b>Location</b><br>
+                    Lat: ${point.latitude.toFixed(4)}, Lon: ${point.longitude.toFixed(4)}
+                    <hr>
+                    <div class="popup-line"><b>Median AQI:</b> ${medianAqi}</div>
+                    <div class="popup-line"><b>Min AQI:</b> ${point.min_aqi}</div>
+                    <div class="popup-line"><b>Max AQI:</b> ${point.max_aqi}</div>
+                `;
+
+                L.circleMarker([point.latitude, point.longitude], {
+                    radius: 4,
+                    fillColor: getColor(medianAqi),
+                    color: "#000",
+                    weight: 0.5,
+                    opacity: 1,
+                    fillOpacity: 0.8
+                }).bindPopup(popupContent).addTo(map);
+            });
+        })
+        .catch(error => console.error('Error loading map data:', error));
+
+</script>
+</body>
+</html>

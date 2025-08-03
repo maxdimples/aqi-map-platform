@@ -1,0 +1,12 @@
+# Python
+__pycache__/
+*.pyc
+
+# Env
+.env
+
+# Credentials
+*.json
+
+# Data files
+*.csv
