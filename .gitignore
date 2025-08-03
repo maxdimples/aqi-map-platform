@@ -1,12 +1,18 @@
+# macOS
+.DS_Store
+
 # Python
 __pycache__/
 *.pyc
 
-# Env
+# IDEs & Environment
+.vscode/
+.idea/
 .env
 
-# Credentials
+# Credentials - CRITICAL
 *.json
 
-# Data files
+# Data files & Output
 *.csv
+*.html
