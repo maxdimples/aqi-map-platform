@@ -127,8 +127,8 @@ def load_to_bigquery(records):
 
 def aggregate_and_publish():
     """
-    FIXED: Queries BigQuery, sanitizes the data by replacing NaN with None,
-    and structures the result into valid JSON for the frontend.
+    FIXED: Uses a robust loop to build the nested JSON structure,
+    correctly handling data types from BigQuery.
     """
     print("--- Aggregating Data for Map (Multi-Timeframe) ---")
     client = bigquery.Client(project=GCP_PROJECT_ID)
@@ -154,35 +154,51 @@ def aggregate_and_publish():
     print("Executing multi-timeframe aggregation query...")
     results_df = client.query(query).to_dataframe()
 
-    # FIX 1: This is the critical step. Replace all forms of 'Not a Number' with Python's None.
-    # This ensures that the final output will be JSON-compliant 'null'.
-    results_df = results_df.replace({pd.NA: None, np.nan: None})
-    
-    # Convert to standard Python integers after handling nulls, which is safer for JSON.
-    for col in ['median_aqi', 'max_aqi', 'min_aqi', 'point_count']:
-        results_df[col] = results_df[col].astype('float').astype('Int64')
+    if results_df.empty:
+        print("Query returned no data. Uploading empty structure.")
+        final_json_payload = {"timeframes": [], "locations": []}
+    else:
+        # --- THIS IS THE FIX ---
+        # A robust method to pivot the data, replacing the fragile one-liner.
+        
+        # 1. Correct data types explicitly. BigQuery client can return objects/strings.
+        numeric_cols = ['latitude', 'longitude', 'median_aqi', 'max_aqi', 'min_aqi', 'point_count']
+        for col in numeric_cols:
+            results_df[col] = pd.to_numeric(results_df[col], errors='coerce')
 
-    print(f"Aggregated {len(results_df)} total rows across all timeframes.")
+        # 2. Drop any rows where key data is missing after conversion.
+        results_df.dropna(subset=['latitude', 'longitude', 'timeframe'], inplace=True)
 
-    def pivot_stats(df):
-        return df.set_index('timeframe').to_dict(orient='index')
+        # 3. Build the nested structure with a clear loop.
+        locations_list = []
+        for (lat, lon), group in results_df.groupby(['latitude', 'longitude']):
+            stats_dict = group.set_index('timeframe').to_dict(orient='index')
+            
+            # Clean up NaN values inside the nested dictionary
+            for timeframe, stats in stats_dict.items():
+                for key, value in stats.items():
+                    if pd.isna(value):
+                        stats[key] = None
 
-    nested_df = results_df.groupby(['latitude', 'longitude'], as_index=False).apply(pivot_stats, include_groups=False).rename(columns={None: 'stats'})
-    
-    timeframes = sorted(results_df['timeframe'].unique().tolist(), reverse=True)
+            location_obj = {
+                "latitude": lat,
+                "longitude": lon,
+                "stats": stats_dict
+            }
+            locations_list.append(location_obj)
 
-    final_json_payload = {
-        "timeframes": timeframes,
-        "locations": nested_df.to_dict(orient='records')
-    }
-    
+        timeframes = sorted(results_df['timeframe'].unique().tolist(), reverse=True)
+        final_json_payload = {
+            "timeframes": timeframes,
+            "locations": locations_list
+        }
+        # --- END OF FIX ---
+
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
     blob = bucket.blob("map_data.json")
     print(f"Uploading structured map_data.json to gs://{GCS_BUCKET_NAME}/")
     
-    # FIX 2: Create the JSON string. Using default_handler for numpy types is robust.
-    final_json_payload = sanitize_for_json(final_json_payload)
-    json_string = json.dumps(final_json_payload, indent=2)
+    json_string = json.dumps(final_json_payload, indent=2, default=lambda x: int(x) if isinstance(x, (np.integer, pd.Int64Dtype.type)) else None if pd.isna(x) else x)
     
     blob.upload_from_string(json_string, content_type='application/json')
     blob.make_public()
