@@ -18,7 +18,7 @@ on:
 
 env:
   GCP_PROJECT_ID: aqi-history-platform # CHANGE to your Project ID
-  GCS_BUCKET_NAME: your-unique-aqi-map-data-bucket-name # CHANGE to your bucket name
+  GCS_BUCKET_NAME: aqi-history-platform # CHANGE to your bucket name
 
 jobs:
   backfill-single-location:
