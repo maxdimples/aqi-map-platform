@@ -153,6 +153,7 @@ def aggregate_and_publish():
     blob = bucket.blob("map_data.json")
     print(f"Uploading structured map_data.json to gs://{GCS_BUCKET_NAME}/")
     json_string = json.dumps(final_json_payload, indent=2)
+    blob.cache_control = "no-cache, no-store, must-revalidate"
     blob.upload_from_string(json_string, content_type='application/json')
     blob.make_public()
     print("Upload complete.")
