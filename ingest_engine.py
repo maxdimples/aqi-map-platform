@@ -6,6 +6,8 @@ import numpy as np # Import numpy
 import json
 from google.cloud import bigquery, storage
 from datetime import datetime, timezone, timedelta
+import math
+
 
 # --- Configuration from Environment Variables ---
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
@@ -24,6 +26,15 @@ SCHEMA = [
     bigquery.SchemaField("aqi_code", "STRING", mode="NULLABLE"),
     bigquery.SchemaField("category", "STRING", mode="NULLABLE"),
 ]
+
+def sanitize_for_json(obj):
+    if isinstance(obj, float) and (math.isnan(obj) or obj is None):
+        return None
+    if isinstance(obj, dict):
+        return {k: sanitize_for_json(v) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [sanitize_for_json(x) for x in obj]
+    return obj
 
 def configure_gcs_cors():
     """
@@ -170,6 +181,7 @@ def aggregate_and_publish():
     print(f"Uploading structured map_data.json to gs://{GCS_BUCKET_NAME}/")
     
     # FIX 2: Create the JSON string. Using default_handler for numpy types is robust.
+    final_json_payload = sanitize_for_json(final_json_payload)
     json_string = json.dumps(final_json_payload, indent=2)
     
     blob.upload_from_string(json_string, content_type='application/json')
