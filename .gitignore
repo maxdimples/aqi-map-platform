@@ -1,18 +1,35 @@
-# macOS
+# --- macOS / System ---
 .DS_Store
 
-# Python
+# --- Python ---
 __pycache__/
 *.pyc
+*.pyo
+*.pyd
+.Python
+env/
+venv/
+pip-log.txt
+pip-delete-this-directory.txt
 
-# IDEs & Environment
+# --- IDE & Environment ---
 .vscode/
 .idea/
-.env
+.env*
 
-# Credentials - CRITICAL
-*.json
+# --- Credentials & Secrets (CRITICAL) ---
+# Be specific. Ignore any file ending in 'credentials.json' or 'service-account.json'
+*credentials.json
+*service-account.json
 
-# Data files & Output
-*.csv
-*.html
+# --- Generated Output & Logs (DO NOT COMMIT) ---
+# These files are created by your scripts.
+map_data.json
+*.log
+
+# --- NOTE ---
+# The following files are REQUIRED for the application to run
+# and therefore are NOT ignored:
+#
+# - nyc_land_points_final.csv (input data)
+# - public/index.html (frontend)
