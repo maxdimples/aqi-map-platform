@@ -6,9 +6,9 @@ on:
     - cron: '0 5 1 * *'
 
 env:
-  GCP_PROJECT_ID: aqi-history-platform # Your Project ID
-  GCS_BUCKET_NAME: aqi-history-platform # Your GCS Bucket Name
-  FIREBASE_ORIGIN: https://aqi-history-platform.web.app # CHANGE to your Firebase URL
+  GCP_PROJECT_ID: aqi-history-platform
+  GCS_BUCKET_NAME: aqi-history-platform
+  FIREBASE_ORIGIN: https://aqi-history-platform.web.app # Your Firebase App URL
 
 jobs:
   ingest-and-process:
@@ -25,11 +25,6 @@ jobs:
       uses: 'google-github-actions/auth@v2'
       with:
         credentials_json: '${{ secrets.GCP_SA_KEY }}'
-
-    - name: Configure GCS CORS Policy for Web App
-      run: |
-        echo '[{"origin": ["${{ env.FIREBASE_ORIGIN }}"], "method": ["GET"], "maxAgeSeconds": 3600}]' > cors.json
-        gsutil cors set cors.json gs://${{ env.GCS_BUCKET_NAME }}
     
     - name: Set up Python
       uses: actions/setup-python@v5

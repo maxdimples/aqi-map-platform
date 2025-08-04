@@ -24,6 +24,37 @@ SCHEMA = [
     bigquery.SchemaField("category", "STRING", mode="NULLABLE"),
 ]
 
+def configure_gcs_cors():
+    """
+    Ensures the GCS bucket has the correct CORS policy for the web app to access it.
+    This is idempotent and safe to run every time.
+    """
+    origin_url = os.environ.get("FIREBASE_ORIGIN")
+    if not origin_url:
+        print("FIREBASE_ORIGIN environment variable not set. Skipping CORS configuration.")
+        return
+
+    print(f"--- Configuring CORS policy for origin: {origin_url} ---")
+    storage_client = storage.Client(project=GCP_PROJECT_ID)
+    bucket = storage_client.bucket(GCS_BUCKET_NAME)
+
+    # This structure must match what the library expects.
+    cors_policy = [{
+        "origin": [origin_url],
+        "method": ["GET"],
+        "maxAgeSeconds": 3600
+    }]
+    
+    # Check if the policy is already set to avoid unnecessary API calls
+    if bucket.cors == cors_policy:
+        print("CORS policy is already up-to-date.")
+        return
+
+    bucket.cors = cors_policy
+    bucket.patch() # Saves the changes to the bucket's metadata
+
+    print(f"Successfully set CORS policy on bucket gs://{GCS_BUCKET_NAME}")
+
 def get_last_month_period():
     """Calculates start and end for the previous full month in RFC3339 format."""
     today = datetime.now(timezone.utc)
@@ -182,6 +213,8 @@ def aggregate_and_publish():
     print("Upload complete.")
 
 if __name__ == "__main__":
+    # 0. Configure bucket (New Step)
+    configure_gcs_cors()
     # 1. Fetch
     records_to_load = asyncio.run(fetch_all_locations())
     # 2. Load

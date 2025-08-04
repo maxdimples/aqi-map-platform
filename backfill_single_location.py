@@ -5,6 +5,7 @@ import json
 import argparse
 from google.cloud import bigquery, storage
 from datetime import datetime, timezone, timedelta
+from ingest_engine import SCHEMA, aggregate_and_publish, load_to_bigquery, configure_gcs_cors
 
 # --- Configuration from Environment Variables ---
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
@@ -79,6 +80,9 @@ async def fetch_one_location(lat, lon, period):
 
 async def main(args):
     """Main orchestration function with corrected logic."""
+    # 0. Configure bucket (New Step)
+    configure_gcs_cors()
+    
     print(f"--- Starting Backfill for Location {args.latitude}, {args.longitude} ---")
     lat, lon = float(args.latitude), float(args.longitude)
     period = get_date_period(args.days)
