@@ -55,7 +55,7 @@ jobs:
 
     - name: Run Backfill Script
       run: |
-        python backfill_single_location.py \
+        python ingest_engine.py \
           --latitude ${{ github.event.inputs.latitude }} \
           --longitude ${{ github.event.inputs.longitude }} \
           --days ${{ github.event.inputs.days_to_fetch }}
