@@ -1,4 +1,4 @@
-# .github/workflows/backfill.yml (Corrected)
+# .github/workflows/backfill.yml
 name: Manual AQI Backfill
 
 on:

@@ -26,29 +26,29 @@ SCHEMA = [
 
 def configure_gcs_cors():
     """
-    Ensures the GCS bucket has the correct CORS policy for the web app to access it.
+    FIX: Ensures the GCS bucket has the correct CORS policy for the web app.
     This is idempotent and safe to run every time.
     """
+    # This URL is passed in from the GitHub Actions workflow environment
     origin_url = os.environ.get("FIREBASE_ORIGIN")
     if not origin_url:
-        print("FIREBASE_ORIGIN environment variable not set. Skipping CORS configuration.")
+        print("WARNING: FIREBASE_ORIGIN environment variable not set. Skipping CORS configuration.")
         return
 
     print(f"--- Configuring CORS policy for origin: {origin_url} ---")
     storage_client = storage.Client(project=GCP_PROJECT_ID)
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
 
+    # Define the desired CORS policy
     cors_policy = [{"origin": [origin_url], "method": ["GET"], "maxAgeSeconds": 3600}]
     
-    # The GCS client library returns the current policy. We can check if it's already correct.
-    # This prevents an unnecessary API call.
-    bucket.reload() # Ensure we have the latest bucket metadata
+    bucket.reload() # Get the latest bucket metadata
     if bucket.cors == cors_policy:
         print("CORS policy is already up-to-date.")
         return
 
     bucket.cors = cors_policy
-    bucket.patch() # Saves the changes to the bucket's metadata
+    bucket.patch() # Save the changes
 
     print(f"Successfully set CORS policy on bucket gs://{GCS_BUCKET_NAME}")
 
@@ -65,10 +65,9 @@ def get_last_month_period():
     return {"startTime": start_time, "endTime": end_time}
 
 async def fetch_one_location(session, lat, lon, period):
-    """Asynchronously fetches historical AQI for one location."""
+    # This function remains unchanged
     api_url = f"https://airquality.googleapis.com/v1/history:lookup?key={GOOGLE_API_KEY}"
     payload = {"location": {"latitude": lat, "longitude": lon}, "period": period}
-    
     try:
         async with session.post(api_url, json=payload) as response:
             response.raise_for_status()
@@ -78,118 +77,90 @@ async def fetch_one_location(session, lat, lon, period):
                 dt_str, indexes = hour_info.get('dateTime'), hour_info.get('indexes', [])
                 if not dt_str or not indexes: continue
                 uAQI = next((idx for idx in indexes if idx.get('code') == 'uAQI'), indexes[0])
-                records.append({
-                    "latitude": lat, "longitude": lon, "datetime": dt_str,
-                    "aqi": uAQI.get('aqi'), "aqi_code": uAQI.get('code'), "category": uAQI.get('category'),
-                })
+                records.append({ "latitude": lat, "longitude": lon, "datetime": dt_str, "aqi": uAQI.get('aqi'), "aqi_code": uAQI.get('code'), "category": uAQI.get('category') })
             return records
     except Exception as e:
         print(f"  - Error fetching {lat},{lon}: {e}")
         return []
 
 async def fetch_all_locations():
-    """Orchestrates parallel fetching for all locations."""
+    # This function remains unchanged
     print("--- Starting Parallel Fetch ---")
+    if not os.path.exists(LOCATIONS_FILE):
+        print(f"ERROR: Locations file '{LOCATIONS_FILE}' not found.")
+        return []
     locations_df = pd.read_csv(LOCATIONS_FILE)
     period = get_last_month_period()
     print(f"Fetching data for period: {period['startTime']} to {period['endTime']}")
-
     all_records = []
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
-    
     async with aiohttp.ClientSession() as session:
         tasks = []
         for _, row in locations_df.iterrows():
             async def limited_fetch(lat, lon):
-                async with semaphore:
-                    return await fetch_one_location(session, lat, lon, period)
+                async with semaphore: return await fetch_one_location(session, lat, lon, period)
             tasks.append(limited_fetch(row['latitude'], row['longitude']))
         results = await asyncio.gather(*tasks)
         for res in results: all_records.extend(res)
-            
     print(f"Fetched a total of {len(all_records)} hourly records.")
     return all_records
 
 def load_to_bigquery(records):
-    """Loads a list of dictionary records into BigQuery."""
+    # This function remains unchanged
     if not records:
         print("No records to load. Skipping BigQuery load.")
         return
     print("--- Loading Data into BigQuery ---")
     client = bigquery.Client(project=GCP_PROJECT_ID)
     table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
-    job_config = bigquery.LoadJobConfig(
-        schema=SCHEMA,
-        source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON,
-        write_disposition=bigquery.WriteDisposition.WRITE_APPEND,
-    )
+    job_config = bigquery.LoadJobConfig(schema=SCHEMA, source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON, write_disposition=bigquery.WriteDisposition.WRITE_APPEND)
     load_job = client.load_table_from_json(records, table_id, job_config=job_config)
     load_job.result()
     print(f"Successfully loaded {load_job.output_rows} rows to {table_id}.")
 
 def aggregate_and_publish():
     """
-    Queries BigQuery to aggregate data by multiple timeframes (all-time and monthly)
-    and uploads the structured result to GCS.
+    FIX: Queries BigQuery to aggregate data by multiple timeframes (all-time and monthly)
+    and uploads the structured result to GCS to match the new frontend.
     """
     print("--- Aggregating Data for Map (Multi-Timeframe) ---")
     client = bigquery.Client(project=GCP_PROJECT_ID)
     storage_client = storage.Client(project=GCP_PROJECT_ID)
     
-    # This is the core logic change. We run two queries and combine them.
-    # 1. Get stats for all time.
-    # 2. Get stats for each individual month.
-    # UNION ALL puts them together in a clean 'long' format.
+    # This advanced query gets stats for all time and for each month in one pass.
     query = f"""
         WITH all_time_stats AS (
             SELECT
-                'all_time' AS timeframe,
-                latitude,
-                longitude,
+                'all_time' AS timeframe, latitude, longitude,
                 APPROX_QUANTILES(aqi, 2)[OFFSET(1)] AS median_aqi,
-                MAX(aqi) AS max_aqi,
-                MIN(aqi) AS min_aqi,
-                COUNT(aqi) AS point_count
-            FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}`
-            GROUP BY latitude, longitude
+                MAX(aqi) AS max_aqi, MIN(aqi) AS min_aqi, COUNT(aqi) AS point_count
+            FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}` GROUP BY latitude, longitude
         ),
         monthly_stats AS (
             SELECT
-                FORMAT_TIMESTAMP('%Y-%m', datetime) AS timeframe,
-                latitude,
-                longitude,
+                FORMAT_TIMESTAMP('%Y-%m', datetime) AS timeframe, latitude, longitude,
                 APPROX_QUANTILES(aqi, 2)[OFFSET(1)] AS median_aqi,
-                MAX(aqi) AS max_aqi,
-                MIN(aqi) AS min_aqi,
-                COUNT(aqi) AS point_count
-            FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}`
-            GROUP BY timeframe, latitude, longitude
+                MAX(aqi) AS max_aqi, MIN(aqi) AS min_aqi, COUNT(aqi) AS point_count
+            FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}` GROUP BY timeframe, latitude, longitude
         )
-        SELECT * FROM all_time_stats
-        UNION ALL
-        SELECT * FROM monthly_stats
+        SELECT * FROM all_time_stats UNION ALL SELECT * FROM monthly_stats
     """
     print("Executing multi-timeframe aggregation query...")
-    query_job = client.query(query)
-    results_df = query_job.to_dataframe()
+    results_df = client.query(query).to_dataframe()
     
-    # Optimization: Convert median_aqi to integer type that can handle Nulls
-    results_df['median_aqi'] = results_df['median_aqi'].astype('Int64')
-    results_df['max_aqi'] = results_df['max_aqi'].astype('Int64')
-    results_df['min_aqi'] = results_df['min_aqi'].astype('Int64')
+    # Use pandas' nullable integer type for stats, which handles missing data gracefully.
+    for col in ['median_aqi', 'max_aqi', 'min_aqi', 'point_count']:
+        results_df[col] = results_df[col].astype('Int64')
 
     print(f"Aggregated {len(results_df)} total rows across all timeframes.")
 
-    # --- Pivot the data into the final JSON structure ---
-    # This complex-looking block efficiently transforms the data from a long table
-    # into the nested JSON structure the frontend needs.
+    # --- Pivot the data into the final nested JSON structure ---
     def pivot_stats(df):
         return df.set_index('timeframe').to_dict(orient='index')
 
-    nested_df = results_df.groupby(['latitude', 'longitude']).apply(pivot_stats).reset_index(name='stats')
+    nested_df = results_df.groupby(['latitude', 'longitude'], as_index=False).apply(pivot_stats).rename(columns={None: 'stats'})
     
-    # Get a sorted, unique list of all available timeframes
-    # We will add this to the JSON so the frontend knows what to put in the dropdown.
+    # Get a sorted, unique list of all available timeframes for the dropdown.
     timeframes = sorted(results_df['timeframe'].unique(), reverse=True)
 
     final_json_payload = {
@@ -197,20 +168,16 @@ def aggregate_and_publish():
         "locations": nested_df.to_dict(orient='records')
     }
     
-    # Upload to GCS
+    # Upload the final JSON to GCS
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
     blob = bucket.blob("map_data.json")
-    
     print(f"Uploading structured map_data.json to gs://{GCS_BUCKET_NAME}/")
-    blob.upload_from_string(
-        json.dumps(final_json_payload), # No indent saves space
-        content_type='application/json'
-    )
+    blob.upload_from_string(json.dumps(final_json_payload), content_type='application/json')
     blob.make_public()
     print("Upload complete.")
 
 if __name__ == "__main__":
-    # Step 0: Ensure cloud infrastructure is correctly configured
+    # Step 0: Set CORS policy. Safe to run every time.
     configure_gcs_cors()
     # 1. Fetch
     records_to_load = asyncio.run(fetch_all_locations())
