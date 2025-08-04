@@ -100,43 +100,84 @@ def load_to_bigquery(records):
     print(f"Successfully loaded {load_job.output_rows} rows to {table_id}.")
 
 def aggregate_and_publish():
-    """Queries BigQuery to aggregate data and uploads the result to GCS."""
-    print("--- Aggregating Data for Map ---")
+    """
+    Queries BigQuery to aggregate data by multiple timeframes (all-time and monthly)
+    and uploads the structured result to GCS.
+    """
+    print("--- Aggregating Data for Map (Multi-Timeframe) ---")
     client = bigquery.Client(project=GCP_PROJECT_ID)
     storage_client = storage.Client(project=GCP_PROJECT_ID)
     
+    # This is the core logic change. We run two queries and combine them.
+    # 1. Get stats for all time.
+    # 2. Get stats for each individual month.
+    # UNION ALL puts them together in a clean 'long' format.
     query = f"""
-        SELECT 
-            latitude, 
-            longitude,
-            -- Use APPROX_QUANTILES to get a fast median, more robust than average
-            APPROX_QUANTILES(aqi, 2)[OFFSET(1)] AS median_aqi,
-            MAX(aqi) as max_aqi,
-            MIN(aqi) as min_aqi,
-            -- Create a compact timeseries array for mini-graphs on the frontend
-            TO_JSON_STRING(ARRAY_AGG(STRUCT(datetime, aqi) ORDER BY datetime)) AS hourly_history
-        FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}`
-        GROUP BY latitude, longitude
+        WITH all_time_stats AS (
+            SELECT
+                'all_time' AS timeframe,
+                latitude,
+                longitude,
+                APPROX_QUANTILES(aqi, 2)[OFFSET(1)] AS median_aqi,
+                MAX(aqi) AS max_aqi,
+                MIN(aqi) AS min_aqi,
+                COUNT(aqi) AS point_count
+            FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}`
+            GROUP BY latitude, longitude
+        ),
+        monthly_stats AS (
+            SELECT
+                FORMAT_TIMESTAMP('%Y-%m', datetime) AS timeframe,
+                latitude,
+                longitude,
+                APPROX_QUANTILES(aqi, 2)[OFFSET(1)] AS median_aqi,
+                MAX(aqi) AS max_aqi,
+                MIN(aqi) AS min_aqi,
+                COUNT(aqi) AS point_count
+            FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}`
+            GROUP BY timeframe, latitude, longitude
+        )
+        SELECT * FROM all_time_stats
+        UNION ALL
+        SELECT * FROM monthly_stats
     """
-    print("Executing aggregation query...")
+    print("Executing multi-timeframe aggregation query...")
     query_job = client.query(query)
     results_df = query_job.to_dataframe()
     
-    print(f"Aggregated data for {len(results_df)} locations.")
+    # Optimization: Convert median_aqi to integer type that can handle Nulls
+    results_df['median_aqi'] = results_df['median_aqi'].astype('Int64')
+    results_df['max_aqi'] = results_df['max_aqi'].astype('Int64')
+    results_df['min_aqi'] = results_df['min_aqi'].astype('Int64')
+
+    print(f"Aggregated {len(results_df)} total rows across all timeframes.")
+
+    # --- Pivot the data into the final JSON structure ---
+    # This complex-looking block efficiently transforms the data from a long table
+    # into the nested JSON structure the frontend needs.
+    def pivot_stats(df):
+        return df.set_index('timeframe').to_dict(orient='index')
+
+    nested_df = results_df.groupby(['latitude', 'longitude']).apply(pivot_stats).reset_index(name='stats')
     
-    # Convert DataFrame to a list of dicts, which is a standard JSON format
-    output_json = results_df.to_dict(orient='records')
+    # Get a sorted, unique list of all available timeframes
+    # We will add this to the JSON so the frontend knows what to put in the dropdown.
+    timeframes = sorted(results_df['timeframe'].unique(), reverse=True)
+
+    final_json_payload = {
+        "timeframes": timeframes,
+        "locations": nested_df.to_dict(orient='records')
+    }
     
     # Upload to GCS
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
     blob = bucket.blob("map_data.json")
     
-    print(f"Uploading map_data.json to gs://{GCS_BUCKET_NAME}/")
+    print(f"Uploading structured map_data.json to gs://{GCS_BUCKET_NAME}/")
     blob.upload_from_string(
-        json.dumps(output_json, indent=2),
+        json.dumps(final_json_payload), # No indent saves space
         content_type='application/json'
     )
-    # Make it public just in case default permissions are restrictive
     blob.make_public()
     print("Upload complete.")
 

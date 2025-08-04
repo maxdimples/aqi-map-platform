@@ -1,15 +1,14 @@
 name: Monthly AQI Ingestion
 
 on:
-  # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
-  # Runs at 05:00 UTC on the 1st day of every month
   schedule:
     - cron: '0 5 1 * *'
 
 env:
-  GCP_PROJECT_ID: aqi-history-platform # CHANGE to your Project ID
-  GCS_BUCKET_NAME: aqi-history-platformme # CHANGE to your bucket name
+  GCP_PROJECT_ID: aqi-history-platform # Your Project ID
+  GCS_BUCKET_NAME: aqi-history-platform # Your GCS Bucket Name
+  FIREBASE_ORIGIN: https://aqi-history-platform.web.app # CHANGE to your Firebase URL
 
 jobs:
   ingest-and-process:
@@ -22,22 +21,26 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
 
-    - name: Set up Python
-      uses: actions/setup-python@v5
-      with:
-        python-version: '3.11'
-        cache: 'pip'
-    
     - name: Authenticate to Google Cloud
       uses: 'google-github-actions/auth@v2'
       with:
         credentials_json: '${{ secrets.GCP_SA_KEY }}'
 
-    - name: Install Dependencies
+    - name: Configure GCS CORS Policy for Web App
+      run: |
+        echo '[{"origin": ["${{ env.FIREBASE_ORIGIN }}"], "method": ["GET"], "maxAgeSeconds": 3600}]' > cors.json
+        gsutil cors set cors.json gs://${{ env.GCS_BUCKET_NAME }}
+    
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install Python Dependencies
       run: pip install -r requirements.txt
 
     - name: Run Ingestion Engine
       run: python ingest_engine.py
       env:
-        # Pass secrets securely to the Python script
         GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}

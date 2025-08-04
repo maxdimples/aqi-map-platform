@@ -1,4 +1,3 @@
-# .github/workflows/backfill.yml
 name: Manual AQI Backfill
 
 on:
@@ -18,8 +17,9 @@ on:
         default: '28'
 
 env:
-  GCP_PROJECT_ID: aqi-history-platform
-  GCS_BUCKET_NAME: aqi-history-platform
+  GCP_PROJECT_ID: aqi-history-platform # Your Project ID
+  GCS_BUCKET_NAME: aqi-history-platform # Your GCS Bucket Name
+  FIREBASE_ORIGIN: https://aqi-history-platform.web.app # CHANGE to your Firebase URL
 
 jobs:
   backfill-single-location:
@@ -32,18 +32,21 @@ jobs:
     - name: Checkout Repository
       uses: actions/checkout@v4
 
+    - name: Authenticate to Google Cloud
+      uses: 'google-github-actions/auth@v2'
+      with:
+        credentials_json: '${{ secrets.GCP_SA_KEY }}'
+    
+    - name: Configure GCS CORS Policy for Web App
+      run: |
+        echo '[{"origin": ["${{ env.FIREBASE_ORIGIN }}"], "method": ["GET"], "maxAgeSeconds": 3600}]' > cors.json
+        gsutil cors set cors.json gs://${{ env.GCS_BUCKET_NAME }}
+
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
         cache: 'pip'
-    
-    # The GDAL installation step has been removed.
-
-    - name: Authenticate to Google Cloud
-      uses: 'google-github-actions/auth@v2'
-      with:
-        credentials_json: '${{ secrets.GCP_SA_KEY }}'
 
     - name: Install Python Dependencies
       run: pip install -r requirements.txt

@@ -1,61 +1,126 @@
 <!DOCTYPE html>
 <html>
 <head>
-    <title>NYC Area Air Quality</title>
+    <title>NYC Area Air Quality Explorer</title>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
     <link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css" />
     <style>
-        body { margin: 0; padding: 0; font-family: sans-serif; }
+        body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; }
         #map { height: 100vh; width: 100vw; }
-        .leaflet-popup-content { width: 220px !important; }
-        .popup-line { margin: 2px 0; }
+        .leaflet-popup-content { width: 240px !important; font-size: 14px; }
+        .popup-line { margin: 4px 0; }
+        .popup-line b { min-width: 90px; display: inline-block; }
+
+        #controls {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1000;
+            background: rgba(255, 255, 255, 0.85);
+            padding: 10px;
+            border-radius: 5px;
+            box-shadow: 0 1px 5px rgba(0,0,0,0.2);
+            backdrop-filter: blur(5px);
+            max-width: 300px;
+        }
+        .control-row { margin-bottom: 8px; }
+        .control-row label { display: block; margin-bottom: 4px; font-weight: bold; font-size: 14px; }
+        #timeframe-select, #aqi-slider { width: 100%; }
+        #loading-indicator {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            z-index: 1001;
+            background: rgba(0,0,0,0.7);
+            color: white;
+            padding: 15px;
+            border-radius: 8px;
+            font-size: 18px;
+        }
     </style>
 </head>
 <body>
 
 <div id="map"></div>
 
+<div id="controls">
+    <div class="control-row">
+        <label for="timeframe-select">Timeframe</label>
+        <select id="timeframe-select"></select>
+    </div>
+    <div class="control-row">
+        <label for="aqi-slider">Max Median AQI: <span id="aqi-value">150</span></label>
+        <input type="range" id="aqi-slider" min="10" max="150" value="150" step="5">
+    </div>
+</div>
+
+<div id="loading-indicator">Loading Data...</div>
+
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-    const GCS_BUCKET_NAME = "aqi-history-platform"; // CHANGE to your bucket name
+    // --- Configuration and Initialization ---
+    const GCS_BUCKET_NAME = "aqi-history-platform"; // Use your actual bucket name
     const DATA_URL = `https://storage.googleapis.com/${GCS_BUCKET_NAME}/map_data.json`;
     
-    // Initialize the map centered on NYC
     const map = L.map('map').setView([40.7128, -74.0060], 8);
-    
-    // Add a clean base map layer
     L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
         attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors © <a href="https://carto.com/attributions">CARTO</a>',
         subdomains: 'abcd',
         maxZoom: 20
     }).addTo(map);
 
-    // Function to determine circle color based on AQI
+    // --- DOM Elements ---
+    const timeframeSelect = document.getElementById('timeframe-select');
+    const aqiSlider = document.getElementById('aqi-slider');
+    const aqiValueSpan = document.getElementById('aqi-value');
+    const loadingIndicator = document.getElementById('loading-indicator');
+
+    // --- Global State ---
+    let allData = null; // Will hold the fetched JSON {timeframes: [], locations: []}
+    const pointLayers = L.layerGroup().addTo(map);
+
+    // --- Functions ---
     function getColor(aqi) {
         return aqi > 150 ? '#d73027' :
                aqi > 100 ? '#fc8d59' :
                aqi > 50  ? '#fee08b' :
                aqi > 0   ? '#91cf60' :
-                           '#7f7f7f';
+                           '#7f7f7f'; // Grey for null/invalid
     }
 
-    // Fetch data and populate the map
-    fetch(DATA_URL)
-        .then(response => response.json())
-        .then(data => {
-            console.log(`Loaded ${data.length} data points.`);
-            data.forEach(point => {
-                const medianAqi = Math.round(point.median_aqi);
-                if (isNaN(medianAqi)) return; // Don't plot points with null data
+    function populateTimeframes(timeframes) {
+        timeframes.forEach(tf => {
+            const option = document.createElement('option');
+            option.value = tf;
+            option.textContent = (tf === 'all_time') ? 'All Time' : tf;
+            timeframeSelect.appendChild(option);
+        });
+    }
 
+    function renderMap() {
+        if (!allData) return;
+
+        pointLayers.clearLayers();
+        const selectedTimeframe = timeframeSelect.value;
+        const maxAqi = parseInt(aqiSlider.value, 10);
+
+        allData.locations.forEach(point => {
+            const stats = point.stats[selectedTimeframe];
+
+            // Filter condition: must have data for the timeframe and be below the AQI slider
+            if (stats && stats.median_aqi <= maxAqi) {
+                const medianAqi = Math.round(stats.median_aqi);
+                
                 const popupContent = `
-                    <b>Location</b><br>
-                    Lat: ${point.latitude.toFixed(4)}, Lon: ${point.longitude.toFixed(4)}
+                    <b>Location:</b> ${point.latitude.toFixed(4)}, ${point.longitude.toFixed(4)}<br>
+                    <b>Timeframe:</b> ${selectedTimeframe === 'all_time' ? 'All Time' : selectedTimeframe}
                     <hr>
                     <div class="popup-line"><b>Median AQI:</b> ${medianAqi}</div>
-                    <div class="popup-line"><b>Min AQI:</b> ${point.min_aqi}</div>
-                    <div class="popup-line"><b>Max AQI:</b> ${point.max_aqi}</div>
+                    <div class="popup-line"><b>Min AQI:</b> ${stats.min_aqi}</div>
+                    <div class="popup-line"><b>Max AQI:</b> ${stats.max_aqi}</div>
+                    <div class="popup-line"><b>Data Points:</b> ${stats.point_count} hrs</div>
                 `;
 
                 L.circleMarker([point.latitude, point.longitude], {
@@ -65,11 +130,35 @@
                     weight: 0.5,
                     opacity: 1,
                     fillOpacity: 0.8
-                }).bindPopup(popupContent).addTo(map);
-            });
-        })
-        .catch(error => console.error('Error loading map data:', error));
+                }).bindPopup(popupContent).addTo(pointLayers);
+            }
+        });
+    }
 
+    // --- Event Listeners ---
+    timeframeSelect.addEventListener('change', renderMap);
+    aqiSlider.addEventListener('input', () => {
+        aqiValueSpan.textContent = aqiSlider.value;
+    });
+    // Use 'change' for slider to only update after user releases mouse
+    aqiSlider.addEventListener('change', renderMap);
+
+    // --- Main Data Fetch ---
+    fetch(DATA_URL)
+        .then(response => {
+            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
+            return response.json();
+        })
+        .then(data => {
+            allData = data;
+            populateTimeframes(data.timeframes);
+            renderMap(); // Initial render
+            loadingIndicator.style.display = 'none'; // Hide loading indicator
+        })
+        .catch(error => {
+            console.error('Error loading map data:', error);
+            loadingIndicator.textContent = 'Error loading data.';
+        });
 </script>
 </body>
 </html>
