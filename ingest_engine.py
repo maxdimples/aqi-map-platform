@@ -18,8 +18,8 @@ BQ_TABLE = "raw_hourly_aqi"
 LOCATIONS_FILE = 'nyc_land_points_final.csv'
 MAX_CONCURRENT_REQUESTS = 250
 SCHEMA = [
-    bigquery.SchemaField("latitude", "FLOAT64", mode="REQUIRED"),
-    bigquery.SchemaField("longitude", "FLOAT64", mode="REQUIRED"),
+    bigquery.SchemaField("latitude", "FLOAT64", mode="NULLABLE"),
+    bigquery.SchemaField("longitude", "FLOAT64", mode="NULLABLE"),
     bigquery.SchemaField("datetime", "TIMESTAMP", mode="REQUIRED"),
     bigquery.SchemaField("aqi", "INTEGER", mode="NULLABLE"),
     bigquery.SchemaField("aqi_code", "STRING", mode="NULLABLE"),
@@ -90,7 +90,7 @@ def load_to_bigquery(records):
 def aggregate_and_publish():
     """
     DEFINITIVE FIX: Disables BigQuery cache and uses a robust manual loop
-    with explicit type casting for data transformation.
+    with explicit type casting and NULL handling for data transformation.
     """
     print("--- Aggregating Data for Map (Multi-Timeframe) ---")
     client = bigquery.Client(project=GCP_PROJECT_ID)
@@ -123,12 +123,16 @@ def aggregate_and_publish():
     all_timeframes = set()
 
     for row in bq_results:
-        # --- THE BULLETPROOF FIX: Explicitly cast to float before rounding ---
+        # --- FIX #2: The Bulletproof Fix - Defensively handle potential NULL coordinates ---
+        if row["latitude"] is None or row["longitude"] is None:
+            print(f"  - Skipping row with NULL coordinates.")
+            continue
+        # ---------------------------------------------------------------------------------
+
         lat = round(float(row["latitude"]), 5)
         lon = round(float(row["longitude"]), 5)
         key = (lat, lon)
-        # --------------------------------------------------------------------
-
+        
         if key not in locations_dict:
             locations_dict[key] = {
                 "latitude": lat,

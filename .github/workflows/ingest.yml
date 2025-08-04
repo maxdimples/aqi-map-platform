@@ -27,6 +27,12 @@ jobs:
       with:
         credentials_json: '${{ secrets.GCP_SA_KEY }}'
 
+    - name: Configure GCS Bucket for Public Access
+      run: |
+        echo "Setting bucket to allow public objects..."
+        gsutil iam ch allUsers:objectViewer gs://${{ env.GCS_BUCKET_NAME }}
+      continue-on-error: true
+
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
