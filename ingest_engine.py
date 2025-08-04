@@ -9,7 +9,7 @@ import json
 from google.cloud import bigquery, storage
 from datetime import datetime, timezone, timedelta
 
-# --- Configuration and most helpers are unchanged ---
+# --- Configuration and helpers are unchanged ---
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME") 
@@ -90,7 +90,7 @@ def load_to_bigquery(records):
 def aggregate_and_publish():
     """
     DEFINITIVE FIX: Disables BigQuery cache and uses a robust manual loop
-    for data transformation.
+    with explicit type casting for data transformation.
     """
     print("--- Aggregating Data for Map (Multi-Timeframe) ---")
     client = bigquery.Client(project=GCP_PROJECT_ID)
@@ -115,20 +115,19 @@ def aggregate_and_publish():
         SELECT * FROM all_time_stats UNION ALL SELECT * FROM year_month_stats UNION ALL SELECT * FROM month_name_stats
     """
     
-    # --- FIX #1: DISABLE THE BIGQUERY CACHE ---
     job_config = bigquery.QueryJobConfig(use_query_cache=False)
     print("Executing multi-timeframe aggregation query (CACHE DISABLED)...")
     bq_results = client.query(query, job_config=job_config).result()
-    # --------------------------------------------
 
-    # --- FIX #2: ROBUST MANUAL TRANSFORMATION ---
     locations_dict = {}
     all_timeframes = set()
 
     for row in bq_results:
-        # Create a stable key by rounding to avoid float precision issues.
-        lat, lon = round(row["latitude"], 5), round(row["longitude"], 5)
+        # --- THE BULLETPROOF FIX: Explicitly cast to float before rounding ---
+        lat = round(float(row["latitude"]), 5)
+        lon = round(float(row["longitude"]), 5)
         key = (lat, lon)
+        # --------------------------------------------------------------------
 
         if key not in locations_dict:
             locations_dict[key] = {
@@ -144,7 +143,6 @@ def aggregate_and_publish():
             "median_aqi": row["median_aqi"], "max_aqi": row["max_aqi"],
             "min_aqi": row["min_aqi"], "point_count": row["point_count"]
         }
-    # -------------------------------------------
 
     final_json_payload = {
         "timeframes": sorted(list(all_timeframes), reverse=True),
