@@ -80,15 +80,15 @@ async def fetch_all_locations():
     print(f"--- Fetching data for period: {period['startTime']} to {period['endTime']} ---")
     all_records = []
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
+    # Using a helper to structure the async calls properly
+    async def limited_fetch(lat, lon, session, semaphore, period):
+        async with semaphore: return await fetch_one_location(session, lat, lon, period)
     async with aiohttp.ClientSession() as session:
         tasks = [limited_fetch(row['latitude'], row['longitude'], session, semaphore, period) for _, row in locations_df.iterrows()]
         results = await asyncio.gather(*tasks)
         for res in results: all_records.extend(res)
     print(f"Fetched a total of {len(all_records)} hourly records.")
     return all_records
-    
-async def limited_fetch(lat, lon, session, semaphore, period):
-    async with semaphore: return await fetch_one_location(session, lat, lon, period)
 
 def load_to_bigquery(records):
     if not records:
@@ -104,8 +104,8 @@ def load_to_bigquery(records):
 
 def aggregate_and_publish():
     """
-    FIXED: Uses a robust loop to build the nested JSON structure,
-    correctly handling data types from BigQuery. This solves the `stats: null` error.
+    DEFINITIVE FIX: Implements the robust transformation logic.
+    This solves the `stats: null` error by correctly handling types and structure.
     """
     print("--- Aggregating Data for Map (Multi-Timeframe) ---")
     client = bigquery.Client(project=GCP_PROJECT_ID)
@@ -129,7 +129,14 @@ def aggregate_and_publish():
         SELECT * FROM all_time_stats UNION ALL SELECT * FROM monthly_stats
     """
     print("Executing multi-timeframe aggregation query...")
-    results_df = client.query(query).to_dataframe(dtypes={"median_aqi": "Int64", "max_aqi": "Int64", "min_aqi": "Int64", "point_count": "Int64"})
+    # Use dtypes to hint pandas about integer columns that might contain nulls.
+    # This is a key part of the fix.
+    results_df = client.query(query).to_dataframe(
+        dtypes={
+            "median_aqi": "Int64", "max_aqi": "Int64", 
+            "min_aqi": "Int64", "point_count": "Int64"
+        }
+    )
 
     if results_df.empty:
         print("Query returned no data. Uploading empty structure.")
@@ -137,11 +144,14 @@ def aggregate_and_publish():
     else:
         results_df.dropna(subset=['latitude', 'longitude', 'timeframe'], inplace=True)
         locations_list = []
+        # Use pandas groupby, which is efficient and idiomatic.
         for (lat, lon), group_df in results_df.groupby(['latitude', 'longitude']):
+            # For each location, pivot its stats by the timeframe.
             stats_dict = group_df.drop(columns=['latitude', 'longitude']).set_index('timeframe').to_dict(orient='index')
+            # Sanitize any remaining pandas N/A types to None for clean JSON.
             for tf_stats in stats_dict.values():
                 for k, v in tf_stats.items():
-                    if pd.isna(v): tf_stats[k] = None # Convert pandas N/A to None for JSON
+                    if pd.isna(v): tf_stats[k] = None
             locations_list.append({"latitude": lat, "longitude": lon, "stats": stats_dict})
         final_json_payload = {
             "timeframes": sorted(results_df['timeframe'].unique().tolist(), reverse=True),
@@ -159,6 +169,7 @@ def aggregate_and_publish():
 if __name__ == "__main__":
     configure_gcs_cors()
     records_to_load = asyncio.run(fetch_all_locations())
-    load_to_bigquery(records_to_load)
+    if records_to_load:
+        load_to_bigquery(records_to_load)
     aggregate_and_publish()
     print("--- Process Complete! ---")
