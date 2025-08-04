@@ -53,4 +53,7 @@ jobs:
           --longitude ${{ github.event.inputs.longitude }} \
           --days ${{ github.event.inputs.days_to_fetch }}
       env:
+        GCP_PROJECT_ID: ${{ env.GCP_PROJECT_ID }}
+        GCS_BUCKET_NAME: ${{ env.GCS_BUCKET_NAME }}
+        FIREBASE_ORIGIN: ${{ env.FIREBASE_ORIGIN }}
         GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}

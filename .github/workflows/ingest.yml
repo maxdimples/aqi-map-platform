@@ -38,4 +38,8 @@ jobs:
     - name: Run Ingestion Engine
       run: python ingest_engine.py
       env:
+        # Pass ALL required env vars and secrets to the script
+        GCP_PROJECT_ID: ${{ env.GCP_PROJECT_ID }}
+        GCS_BUCKET_NAME: ${{ env.GCS_BUCKET_NAME }}
+        FIREBASE_ORIGIN: ${{ env.FIREBASE_ORIGIN }}
         GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
