@@ -158,10 +158,10 @@ def aggregate_and_publish():
         print("Query returned no data. Uploading empty structure.")
         final_json_payload = {"timeframes": [], "locations": []}
     else:
-        # --- THIS IS THE FIX ---
-        # A robust method to pivot the data, replacing the fragile one-liner.
+        # --- THIS IS THE ROBUST FIX ---
         
-        # 1. Correct data types explicitly. BigQuery client can return objects/strings.
+        # 1. Explicitly convert all columns that should be numeric.
+        # This is the most critical step to handle the string-based BigQuery output.
         numeric_cols = ['latitude', 'longitude', 'median_aqi', 'max_aqi', 'min_aqi', 'point_count']
         for col in numeric_cols:
             results_df[col] = pd.to_numeric(results_df[col], errors='coerce')
@@ -169,12 +169,14 @@ def aggregate_and_publish():
         # 2. Drop any rows where key data is missing after conversion.
         results_df.dropna(subset=['latitude', 'longitude', 'timeframe'], inplace=True)
 
-        # 3. Build the nested structure with a clear loop.
+        # 3. Build the nested structure with a clear, explicit loop. This is foolproof.
         locations_list = []
-        for (lat, lon), group in results_df.groupby(['latitude', 'longitude']):
-            stats_dict = group.set_index('timeframe').to_dict(orient='index')
+        for (lat, lon), group_df in results_df.groupby(['latitude', 'longitude']):
+            # For each location, pivot its stats by the timeframe.
+            # Drop lat/lon from the inner dict as they are already top-level keys.
+            stats_dict = group_df.drop(columns=['latitude', 'longitude']).set_index('timeframe').to_dict(orient='index')
             
-            # Clean up NaN values inside the nested dictionary
+            # Sanitize any remaining NaN values inside the nested dictionary to null
             for timeframe, stats in stats_dict.items():
                 for key, value in stats.items():
                     if pd.isna(value):
@@ -198,7 +200,8 @@ def aggregate_and_publish():
     blob = bucket.blob("map_data.json")
     print(f"Uploading structured map_data.json to gs://{GCS_BUCKET_NAME}/")
     
-    json_string = json.dumps(final_json_payload, indent=2, default=lambda x: int(x) if isinstance(x, (np.integer, pd.Int64Dtype.type)) else None if pd.isna(x) else x)
+    # Use a robust default handler for any lingering numpy/pandas types.
+    json_string = json.dumps(final_json_payload, indent=2, default=lambda x: int(x) if isinstance(x, np.integer) else x)
     
     blob.upload_from_string(json_string, content_type='application/json')
     blob.make_public()
