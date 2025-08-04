@@ -14,7 +14,6 @@ BQ_DATASET = "air_quality"
 BQ_TABLE = "raw_hourly_aqi"
 
 # --- Import shared functions from the main engine ---
-# This avoids code duplication.
 from ingest_engine import SCHEMA, aggregate_and_publish, load_to_bigquery
 
 def get_date_period(days_to_fetch):
@@ -79,7 +78,7 @@ async def fetch_one_location(lat, lon, period):
             return []
 
 async def main(args):
-    """Main orchestration function."""
+    """Main orchestration function with corrected logic."""
     print(f"--- Starting Backfill for Location {args.latitude}, {args.longitude} ---")
     lat, lon = float(args.latitude), float(args.longitude)
     period = get_date_period(args.days)
@@ -89,25 +88,22 @@ async def main(args):
 
     # 1. Idempotency Check
     if check_if_data_exists(bq_client, lat, lon, period):
-        print("Data for this location and period already exists in BigQuery. Halting.")
-        return
+        print("Data for this location and period already exists in BigQuery. Skipping API fetch.")
+    else:
+        # 2. Fetch and Load only if data is missing
+        print("No existing data found. Proceeding with API fetch.")
+        records_to_load = await fetch_one_location(lat, lon, period)
+        if records_to_load:
+            print(f"Fetched {len(records_to_load)} new hourly records.")
+            load_to_bigquery(records_to_load)
+        else:
+            print("API fetch returned no records.")
 
-    print("No existing data found. Proceeding with API fetch.")
-    
-    # 2. Fetch Data
-    records_to_load = await fetch_one_location(lat, lon, period)
-    if not records_to_load:
-        print("API fetch returned no records. Exiting.")
-        return
-    print(f"Fetched {len(records_to_load)} new hourly records.")
-
-    # 3. Load to BigQuery
-    load_to_bigquery(records_to_load)
-
-    # 4. Re-aggregate ALL data and publish to GCS to update the map
+    # 3. Re-aggregate and Publish - THIS STEP NOW RUNS EVERY TIME
+    print("\nRefreshing public map data from BigQuery...")
     aggregate_and_publish()
 
-    print("--- Backfill Process Complete! ---")
+    print("--- Process Complete! ---")
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Backfill AQI data for a single location.")
