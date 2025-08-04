@@ -34,13 +34,11 @@ jobs:
 
     - name: Install Python Dependencies
       run: pip install -r requirements.txt
-
-    - name: 🚀 Apply GCS CORS Policy
-      run: |
-        echo '[{"origin": ["${{ env.FIREBASE_ORIGIN }}"], "method": ["GET"], "responseHeader": ["Content-Type"], "maxAgeSeconds": 3600}]' > cors.json
-        gsutil cors set cors.json gs://${{ env.GCS_BUCKET_NAME }}
         
     - name: Run Ingestion Engine
       run: python ingest_engine.py
       env:
+        GCP_PROJECT_ID: ${{ env.GCP_PROJECT_ID }}
+        GCS_BUCKET_NAME: ${{ env.GCS_BUCKET_NAME }}
+        FIREBASE_ORIGIN: ${{ env.FIREBASE_ORIGIN }}
         GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}

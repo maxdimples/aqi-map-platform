@@ -1,3 +1,4 @@
+# .github/workflows/backfill.yml (Corrected)
 name: Manual AQI Backfill
 
 on:
@@ -37,6 +38,8 @@ jobs:
       with:
         credentials_json: '${{ secrets.GCP_SA_KEY }}'
 
+    # THE FAULTY GSUTIL STEP HAS BEEN REMOVED FROM HERE
+
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
@@ -46,11 +49,6 @@ jobs:
     - name: Install Python Dependencies
       run: pip install -r requirements.txt
 
-    - name: 🚀 Apply GCS CORS Policy
-      run: |
-        echo '[{"origin": ["${{ env.FIREBASE_ORIGIN }}"], "method": ["GET"], "responseHeader": ["Content-Type"], "maxAgeSeconds": 3600}]' > cors.json
-        gsutil cors set cors.json gs://${{ env.GCS_BUCKET_NAME }}
-
     - name: Run Backfill Script
       run: |
         python backfill_single_location.py \
@@ -58,4 +56,7 @@ jobs:
           --longitude ${{ github.event.inputs.longitude }} \
           --days ${{ github.event.inputs.days_to_fetch }}
       env:
+        GCP_PROJECT_ID: ${{ env.GCP_PROJECT_ID }}
+        GCS_BUCKET_NAME: ${{ env.GCS_BUCKET_NAME }}
+        FIREBASE_ORIGIN: ${{ env.FIREBASE_ORIGIN }}
         GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
