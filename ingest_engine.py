@@ -9,39 +9,19 @@ import json
 from google.cloud import bigquery, storage
 from datetime import datetime, timezone, timedelta
 
-# --- Configuration (remains the same) ---
-GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
-GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
-GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME") 
-BQ_DATASET = "air_quality"
-BQ_TABLE = "raw_hourly_aqi"
-LOCATIONS_FILE = 'nyc_land_points_final.csv'
-MAX_CONCURRENT_REQUESTS = 250
-SCHEMA = [
-    bigquery.SchemaField("latitude", "FLOAT64", mode="REQUIRED"),
-    bigquery.SchemaField("longitude", "FLOAT64", mode="REQUIRED"),
-    bigquery.SchemaField("datetime", "TIMESTAMP", mode="REQUIRED"),
-    bigquery.SchemaField("aqi", "INTEGER", mode="NULLABLE"),
-    bigquery.SchemaField("aqi_code", "STRING", mode="NULLABLE"),
-    bigquery.SchemaField("category", "STRING", mode="NULLABLE"),
-]
+# --- Configuration and Helper functions (no changes needed) ---
+# ... (All code from configure_gcs_cors down to load_to_bigquery is correct) ...
 
-# --- Helper functions (CORS, fetch, load remain the same) ---
 def configure_gcs_cors():
     origin_url = os.environ.get("FIREBASE_ORIGIN")
-    if not origin_url:
-        print("WARNING: FIREBASE_ORIGIN not set. Skipping CORS config.")
-        return
+    if not origin_url: print("WARNING: FIREBASE_ORIGIN not set. Skipping CORS config."); return
     print(f"--- Configuring CORS policy for origin: {origin_url} ---")
     storage_client = storage.Client(project=GCP_PROJECT_ID)
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
     cors_policy = [{"origin": [origin_url], "method": ["GET"], "maxAgeSeconds": 3600}]
-    bucket.reload() 
-    if bucket.cors == cors_policy:
-        print("CORS policy is already up-to-date.")
-        return
-    bucket.cors = cors_policy
-    bucket.patch()
+    bucket.reload()
+    if bucket.cors == cors_policy: print("CORS policy is already up-to-date."); return
+    bucket.cors = cors_policy; bucket.patch()
     print(f"Successfully set CORS policy on bucket gs://{GCS_BUCKET_NAME}")
 
 def get_last_month_period():
@@ -58,8 +38,7 @@ async def fetch_one_location(session, lat, lon, period):
     payload = {"location": {"latitude": lat, "longitude": lon}, "period": period}
     try:
         async with session.post(api_url, json=payload) as response:
-            response.raise_for_status()
-            data = await response.json()
+            response.raise_for_status(); data = await response.json()
             records = []
             for hour_info in data.get('hoursInfo', []):
                 dt_str, indexes = hour_info.get('dateTime'), hour_info.get('indexes', [])
@@ -68,19 +47,13 @@ async def fetch_one_location(session, lat, lon, period):
                 records.append({ "latitude": lat, "longitude": lon, "datetime": dt_str, "aqi": uAQI.get('aqi'), "aqi_code": uAQI.get('code'), "category": uAQI.get('category') })
             return records
     except Exception as e:
-        print(f"  - Error fetching {lat},{lon}: {e}")
-        return []
+        print(f"  - Error fetching {lat},{lon}: {e}"); return []
 
 async def fetch_all_locations():
-    if not os.path.exists(LOCATIONS_FILE):
-        print(f"ERROR: Locations file '{LOCATIONS_FILE}' not found.")
-        return []
-    locations_df = pd.read_csv(LOCATIONS_FILE)
-    period = get_last_month_period()
+    if not os.path.exists(LOCATIONS_FILE): print(f"ERROR: Locations file '{LOCATIONS_FILE}' not found."); return []
+    locations_df = pd.read_csv(LOCATIONS_FILE); period = get_last_month_period()
     print(f"--- Fetching data for period: {period['startTime']} to {period['endTime']} ---")
-    all_records = []
-    semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
-    # Using a helper to structure the async calls properly
+    all_records = []; semaphore = asyncio.Semaphore(MAX_CONCURRENT_REQUESTS)
     async def limited_fetch(lat, lon, session, semaphore, period):
         async with semaphore: return await fetch_one_location(session, lat, lon, period)
     async with aiohttp.ClientSession() as session:
@@ -91,26 +64,25 @@ async def fetch_all_locations():
     return all_records
 
 def load_to_bigquery(records):
-    if not records:
-        print("No records to load. Skipping BigQuery load.")
-        return
+    if not records: print("No records to load. Skipping BigQuery load."); return
     print("--- Loading Data into BigQuery ---")
     client = bigquery.Client(project=GCP_PROJECT_ID)
     table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
     job_config = bigquery.LoadJobConfig(schema=SCHEMA, source_format=bigquery.SourceFormat.NEWLINE_DELIMITED_JSON, write_disposition=bigquery.WriteDisposition.WRITE_APPEND)
-    load_job = client.load_table_from_json(records, table_id, job_config=job_config)
-    load_job.result()
+    load_job = client.load_table_from_json(records, table_id, job_config=job_config); load_job.result()
     print(f"Successfully loaded {load_job.output_rows} rows to {table_id}.")
+
 
 def aggregate_and_publish():
     """
-    DEFINITIVE FIX: Implements the robust transformation logic.
-    This solves the `stats: null` error by correctly handling types and structure.
+    DEFINITIVE FIX: Implements the robust transformation logic and new aggregations.
+    This solves the `stats: null` error and adds month-name rollups.
     """
     print("--- Aggregating Data for Map (Multi-Timeframe) ---")
     client = bigquery.Client(project=GCP_PROJECT_ID)
     storage_client = storage.Client(project=GCP_PROJECT_ID)
     
+    # NEW: The query now includes a third aggregation for month names.
     query = f"""
         WITH all_time_stats AS (
             SELECT
@@ -119,44 +91,57 @@ def aggregate_and_publish():
                 MAX(aqi) AS max_aqi, MIN(aqi) AS min_aqi, COUNT(aqi) AS point_count
             FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}` GROUP BY latitude, longitude
         ),
-        monthly_stats AS (
+        year_month_stats AS (
             SELECT
                 FORMAT_TIMESTAMP('%Y-%m', datetime) AS timeframe, latitude, longitude,
                 APPROX_QUANTILES(aqi, 2)[OFFSET(1)] AS median_aqi,
                 MAX(aqi) AS max_aqi, MIN(aqi) AS min_aqi, COUNT(aqi) AS point_count
             FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}` GROUP BY timeframe, latitude, longitude
+        ),
+        month_name_stats AS (
+            SELECT
+                FORMAT_TIMESTAMP('%B', datetime) AS timeframe, latitude, longitude,
+                APPROX_QUANTILES(aqi, 2)[OFFSET(1)] AS median_aqi,
+                MAX(aqi) AS max_aqi, MIN(aqi) AS min_aqi, COUNT(aqi) AS point_count
+            FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}` GROUP BY timeframe, latitude, longitude
         )
-        SELECT * FROM all_time_stats UNION ALL SELECT * FROM monthly_stats
+        SELECT * FROM all_time_stats
+        UNION ALL SELECT * FROM year_month_stats
+        UNION ALL SELECT * FROM month_name_stats
     """
     print("Executing multi-timeframe aggregation query...")
-    # Use dtypes to hint pandas about integer columns that might contain nulls.
-    # This is a key part of the fix.
-    results_df = client.query(query).to_dataframe(
-        dtypes={
-            "median_aqi": "Int64", "max_aqi": "Int64", 
-            "min_aqi": "Int64", "point_count": "Int64"
-        }
-    )
+    bq_results = client.query(query).result()
 
-    if results_df.empty:
-        print("Query returned no data. Uploading empty structure.")
-        final_json_payload = {"timeframes": [], "locations": []}
-    else:
-        results_df.dropna(subset=['latitude', 'longitude', 'timeframe'], inplace=True)
-        locations_list = []
-        # Use pandas groupby, which is efficient and idiomatic.
-        for (lat, lon), group_df in results_df.groupby(['latitude', 'longitude']):
-            # For each location, pivot its stats by the timeframe.
-            stats_dict = group_df.drop(columns=['latitude', 'longitude']).set_index('timeframe').to_dict(orient='index')
-            # Sanitize any remaining pandas N/A types to None for clean JSON.
-            for tf_stats in stats_dict.values():
-                for k, v in tf_stats.items():
-                    if pd.isna(v): tf_stats[k] = None
-            locations_list.append({"latitude": lat, "longitude": lon, "stats": stats_dict})
-        final_json_payload = {
-            "timeframes": sorted(results_df['timeframe'].unique().tolist(), reverse=True),
-            "locations": locations_list
+    # THE FOOLPROOF FIX: Manual dictionary construction.
+    locations_dict = {}
+    all_timeframes = set()
+
+    for row in bq_results:
+        # Create a stable key by rounding to avoid float precision issues.
+        lat, lon = round(row["latitude"], 5), round(row["longitude"], 5)
+        key = (lat, lon)
+
+        if key not in locations_dict:
+            locations_dict[key] = {
+                "latitude": lat,
+                "longitude": lon,
+                "stats": {}
+            }
+        
+        timeframe = row["timeframe"]
+        all_timeframes.add(timeframe)
+        
+        locations_dict[key]["stats"][timeframe] = {
+            "median_aqi": row["median_aqi"],
+            "max_aqi": row["max_aqi"],
+            "min_aqi": row["min_aqi"],
+            "point_count": row["point_count"]
         }
+
+    final_json_payload = {
+        "timeframes": sorted(list(all_timeframes), reverse=True),
+        "locations": list(locations_dict.values())
+    }
 
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
     blob = bucket.blob("map_data.json")
@@ -165,6 +150,7 @@ def aggregate_and_publish():
     blob.upload_from_string(json_string, content_type='application/json')
     blob.make_public()
     print("Upload complete.")
+
 
 if __name__ == "__main__":
     configure_gcs_cors()
