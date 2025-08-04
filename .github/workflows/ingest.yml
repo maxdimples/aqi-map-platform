@@ -9,7 +9,7 @@ on:
 env:
   GCP_PROJECT_ID: aqi-history-platform
   GCS_BUCKET_NAME: aqi-history-platform
-  FIREBASE_ORIGIN: https://aqi-history-platform.web.app # Your Firebase App URL
+  FIREBASE_ORIGIN: https://aqi-history.web.app # Your Firebase App URL
 
 jobs:
   ingest-and-process:
