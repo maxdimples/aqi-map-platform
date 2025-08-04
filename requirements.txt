@@ -8,3 +8,4 @@ pandas
 google-cloud-bigquery
 google-cloud-storage
 aiohttp
+db-dtypes
