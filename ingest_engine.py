@@ -86,7 +86,7 @@ def load_to_bigquery(records):
     
     # Efficiently handle potential NULLs during load by converting to a DataFrame first
     df = pd.DataFrame(records)
-    # The BigQuery client handles Python None -> BQ NULL automatically
+    df['datetime'] = pd.to_datetime(df['datetime'])
     
     load_job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
     load_job.result()
