@@ -9,8 +9,22 @@ import json
 from google.cloud import bigquery, storage
 from datetime import datetime, timezone, timedelta
 
-# --- Configuration and Helper functions (no changes needed) ---
-# ... (All code from configure_gcs_cors down to load_to_bigquery is correct) ...
+# --- Configuration and most helpers are unchanged ---
+GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
+GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
+GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME") 
+BQ_DATASET = "air_quality"
+BQ_TABLE = "raw_hourly_aqi"
+LOCATIONS_FILE = 'nyc_land_points_final.csv'
+MAX_CONCURRENT_REQUESTS = 250
+SCHEMA = [
+    bigquery.SchemaField("latitude", "FLOAT64", mode="REQUIRED"),
+    bigquery.SchemaField("longitude", "FLOAT64", mode="REQUIRED"),
+    bigquery.SchemaField("datetime", "TIMESTAMP", mode="REQUIRED"),
+    bigquery.SchemaField("aqi", "INTEGER", mode="NULLABLE"),
+    bigquery.SchemaField("aqi_code", "STRING", mode="NULLABLE"),
+    bigquery.SchemaField("category", "STRING", mode="NULLABLE"),
+]
 
 def configure_gcs_cors():
     origin_url = os.environ.get("FIREBASE_ORIGIN")
@@ -75,44 +89,39 @@ def load_to_bigquery(records):
 
 def aggregate_and_publish():
     """
-    DEFINITIVE FIX: Implements the robust transformation logic and new aggregations.
-    This solves the `stats: null` error and adds month-name rollups.
+    DEFINITIVE FIX: Disables BigQuery cache and uses a robust manual loop
+    for data transformation.
     """
     print("--- Aggregating Data for Map (Multi-Timeframe) ---")
     client = bigquery.Client(project=GCP_PROJECT_ID)
     storage_client = storage.Client(project=GCP_PROJECT_ID)
     
-    # NEW: The query now includes a third aggregation for month names.
     query = f"""
         WITH all_time_stats AS (
-            SELECT
-                'all_time' AS timeframe, latitude, longitude,
-                APPROX_QUANTILES(aqi, 2)[OFFSET(1)] AS median_aqi,
-                MAX(aqi) AS max_aqi, MIN(aqi) AS min_aqi, COUNT(aqi) AS point_count
+            SELECT 'all_time' AS timeframe, latitude, longitude,
+                APPROX_QUANTILES(aqi, 2)[OFFSET(1)] AS median_aqi, MAX(aqi) AS max_aqi, MIN(aqi) AS min_aqi, COUNT(aqi) AS point_count
             FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}` GROUP BY latitude, longitude
         ),
         year_month_stats AS (
-            SELECT
-                FORMAT_TIMESTAMP('%Y-%m', datetime) AS timeframe, latitude, longitude,
-                APPROX_QUANTILES(aqi, 2)[OFFSET(1)] AS median_aqi,
-                MAX(aqi) AS max_aqi, MIN(aqi) AS min_aqi, COUNT(aqi) AS point_count
+            SELECT FORMAT_TIMESTAMP('%Y-%m', datetime) AS timeframe, latitude, longitude,
+                APPROX_QUANTILES(aqi, 2)[OFFSET(1)] AS median_aqi, MAX(aqi) AS max_aqi, MIN(aqi) AS min_aqi, COUNT(aqi) AS point_count
             FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}` GROUP BY timeframe, latitude, longitude
         ),
         month_name_stats AS (
-            SELECT
-                FORMAT_TIMESTAMP('%B', datetime) AS timeframe, latitude, longitude,
-                APPROX_QUANTILES(aqi, 2)[OFFSET(1)] AS median_aqi,
-                MAX(aqi) AS max_aqi, MIN(aqi) AS min_aqi, COUNT(aqi) AS point_count
+            SELECT FORMAT_TIMESTAMP('%B', datetime) AS timeframe, latitude, longitude,
+                APPROX_QUANTILES(aqi, 2)[OFFSET(1)] AS median_aqi, MAX(aqi) AS max_aqi, MIN(aqi) AS min_aqi, COUNT(aqi) AS point_count
             FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}` GROUP BY timeframe, latitude, longitude
         )
-        SELECT * FROM all_time_stats
-        UNION ALL SELECT * FROM year_month_stats
-        UNION ALL SELECT * FROM month_name_stats
+        SELECT * FROM all_time_stats UNION ALL SELECT * FROM year_month_stats UNION ALL SELECT * FROM month_name_stats
     """
-    print("Executing multi-timeframe aggregation query...")
-    bq_results = client.query(query).result()
+    
+    # --- FIX #1: DISABLE THE BIGQUERY CACHE ---
+    job_config = bigquery.QueryJobConfig(use_query_cache=False)
+    print("Executing multi-timeframe aggregation query (CACHE DISABLED)...")
+    bq_results = client.query(query, job_config=job_config).result()
+    # --------------------------------------------
 
-    # THE FOOLPROOF FIX: Manual dictionary construction.
+    # --- FIX #2: ROBUST MANUAL TRANSFORMATION ---
     locations_dict = {}
     all_timeframes = set()
 
@@ -132,11 +141,10 @@ def aggregate_and_publish():
         all_timeframes.add(timeframe)
         
         locations_dict[key]["stats"][timeframe] = {
-            "median_aqi": row["median_aqi"],
-            "max_aqi": row["max_aqi"],
-            "min_aqi": row["min_aqi"],
-            "point_count": row["point_count"]
+            "median_aqi": row["median_aqi"], "max_aqi": row["max_aqi"],
+            "min_aqi": row["min_aqi"], "point_count": row["point_count"]
         }
+    # -------------------------------------------
 
     final_json_payload = {
         "timeframes": sorted(list(all_timeframes), reverse=True),
