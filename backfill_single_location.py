@@ -5,7 +5,6 @@ import json
 import argparse
 from google.cloud import bigquery, storage
 from datetime import datetime, timezone, timedelta
-from ingest_engine import SCHEMA, aggregate_and_publish, load_to_bigquery, configure_gcs_cors
 
 # --- Configuration from Environment Variables ---
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
@@ -15,7 +14,7 @@ BQ_DATASET = "air_quality"
 BQ_TABLE = "raw_hourly_aqi"
 
 # --- Import shared functions from the main engine ---
-from ingest_engine import SCHEMA, aggregate_and_publish, load_to_bigquery
+from ingest_engine import SCHEMA, aggregate_and_publish, load_to_bigquery, configure_gcs_cors
 
 def get_date_period(days_to_fetch):
     """Calculates start and end for the last N days in RFC3339 format."""
@@ -80,9 +79,9 @@ async def fetch_one_location(lat, lon, period):
 
 async def main(args):
     """Main orchestration function with corrected logic."""
-    # 0. Configure bucket (New Step)
+    # Step 0: Ensure cloud infrastructure is correctly configured
     configure_gcs_cors()
-    
+
     print(f"--- Starting Backfill for Location {args.latitude}, {args.longitude} ---")
     lat, lon = float(args.latitude), float(args.longitude)
     period = get_date_period(args.days)

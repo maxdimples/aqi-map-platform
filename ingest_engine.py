@@ -38,14 +38,11 @@ def configure_gcs_cors():
     storage_client = storage.Client(project=GCP_PROJECT_ID)
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
 
-    # This structure must match what the library expects.
-    cors_policy = [{
-        "origin": [origin_url],
-        "method": ["GET"],
-        "maxAgeSeconds": 3600
-    }]
+    cors_policy = [{"origin": [origin_url], "method": ["GET"], "maxAgeSeconds": 3600}]
     
-    # Check if the policy is already set to avoid unnecessary API calls
+    # The GCS client library returns the current policy. We can check if it's already correct.
+    # This prevents an unnecessary API call.
+    bucket.reload() # Ensure we have the latest bucket metadata
     if bucket.cors == cors_policy:
         print("CORS policy is already up-to-date.")
         return
@@ -213,7 +210,7 @@ def aggregate_and_publish():
     print("Upload complete.")
 
 if __name__ == "__main__":
-    # 0. Configure bucket (New Step)
+    # Step 0: Ensure cloud infrastructure is correctly configured
     configure_gcs_cors()
     # 1. Fetch
     records_to_load = asyncio.run(fetch_all_locations())
