@@ -29,13 +29,21 @@ def configure_gcs_cors():
     origin_url = os.environ.get("FIREBASE_ORIGIN")
     if not origin_url: print("WARNING: FIREBASE_ORIGIN not set. Skipping CORS config."); return
     print(f"--- Configuring CORS policy for origin: {origin_url} ---")
-    storage_client = storage.Client(project=GCP_PROJECT_ID)
-    bucket = storage_client.bucket(GCS_BUCKET_NAME)
-    cors_policy = [{"origin": [origin_url], "method": ["GET"], "maxAgeSeconds": 3600}]
-    bucket.reload()
-    if bucket.cors == cors_policy: print("CORS policy is already up-to-date."); return
-    bucket.cors = cors_policy; bucket.patch()
-    print(f"Successfully set CORS policy on bucket gs://{GCS_BUCKET_NAME}")
+    
+    # --- THE FIX: Make this non-critical step resilient to permission issues ---
+    try:
+        storage_client = storage.Client(project=GCP_PROJECT_ID)
+        bucket = storage_client.bucket(GCS_BUCKET_NAME)
+        cors_policy = [{"origin": [origin_url], "method": ["GET"], "maxAgeSeconds": 3600}]
+        bucket.reload() # This call requires storage.buckets.getIamPolicy
+        if bucket.cors == cors_policy:
+            print("CORS policy is already up-to-date.")
+            return
+        bucket.cors = cors_policy
+        bucket.patch() # This call requires storage.buckets.setIamPolicy
+        print(f"Successfully set CORS policy on bucket gs://{GCS_BUCKET_NAME}")
+    except Exception as e:
+        print(f"WARNING: Could not configure GCS CORS policy. This is non-fatal. Error: {e}")
 
 def get_time_period(days=None):
     """
@@ -84,8 +92,8 @@ def load_to_bigquery(records):
     table_id = f"{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}"
     job_config = bigquery.LoadJobConfig(schema=SCHEMA, write_disposition=bigquery.WriteDisposition.WRITE_APPEND)
     
-    # Efficiently handle potential NULLs during load by converting to a DataFrame first
     df = pd.DataFrame(records)
+    # This line is correct, but depends on the new requirement.
     df['datetime'] = pd.to_datetime(df['datetime'])
     
     load_job = client.load_table_from_dataframe(df, table_id, job_config=job_config)
