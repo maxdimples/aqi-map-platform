@@ -1,0 +1,55 @@
+name: Manual AQI Backfill
+
+on:
+  workflow_dispatch:
+    inputs:
+      latitude:
+        description: 'Latitude to fetch'
+        required: true
+        default: '44.278820'
+      longitude:
+        description: 'Longitude to fetch'
+        required: true
+        default: '-71.697578'
+      days_to_fetch:
+        description: 'Number of past days of history'
+        required: true
+        default: '28'
+
+env:
+  GCP_PROJECT_ID: aqi-history-platform # CHANGE to your Project ID
+  GCS_BUCKET_NAME: your-unique-aqi-map-data-bucket-name # CHANGE to your bucket name
+
+jobs:
+  backfill-single-location:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+    
+    - name: Authenticate to Google Cloud
+      uses: 'google-github-actions/auth@v2'
+      with:
+        credentials_json: '${{ secrets.GCP_SA_KEY }}'
+
+    - name: Install Dependencies
+      run: pip install -r requirements.txt
+
+    - name: Run Backfill Script
+      run: |
+        python backfill_single_location.py \
+          --latitude ${{ github.event.inputs.latitude }} \
+          --longitude ${{ github.event.inputs.longitude }} \
+          --days ${{ github.event.inputs.days_to_fetch }}
+      env:
+        GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
