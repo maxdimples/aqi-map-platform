@@ -2,6 +2,7 @@
 
 import asyncio
 import aiohttp
+from aiohttp_retry import RetryClient, ExponentialRetry # <-- Import the retry library
 import os
 import pandas as pd
 import json
@@ -12,14 +13,14 @@ from dateutil.relativedelta import relativedelta
 import uuid
 
 # --- Configuration ---
+# Moto: Optimize -> Reduce concurrency to a safer level as a first line of defense.
+MAX_CONCURRENT_REQUESTS = 50 # <-- REDUCED from 250 to 50
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME") 
 BQ_DATASET = "air_quality"
 BQ_TABLE = "raw_hourly_aqi"
 LOCATIONS_FILE = 'nyc_land_points_final.csv'
-MAX_CONCURRENT_REQUESTS = 250
-NUM_GROUPS = 4 # For weekly staggered runs
 SCHEMA = [
     bigquery.SchemaField("latitude", "FLOAT64", mode="NULLABLE"),
     bigquery.SchemaField("longitude", "FLOAT64", mode="NULLABLE"),
@@ -29,32 +30,25 @@ SCHEMA = [
     bigquery.SchemaField("category", "STRING", mode="NULLABLE"),
 ]
 
+# --- get_time_period (Unchanged) ---
 def get_time_period(month_offset=0, days=7):
-    """
-    Calculates start and end for a past period.
-    - month_offset=0: Current month's 7-day period.
-    - month_offset=1: Last month's 7-day period, etc.
-    """
     today = datetime.now(timezone.utc)
     target_month = today - relativedelta(months=month_offset)
-    
-    # Get the last day of that month to define the end_time
     end_of_month = target_month.replace(day=1) + relativedelta(months=1) - timedelta(days=1)
     end_time = end_of_month.replace(hour=23, minute=59, second=59)
     start_time = end_time - timedelta(days=(days-1))
-    
     return {
         "startTime": start_time.strftime('%Y-%m-%dT%H:%M:%SZ'),
         "endTime": end_time.strftime('%Y-%m-%dT%H:%M:%SZ')
     }
 
-async def fetch_one_location(session, lat, lon, period):
-    """Fetches data for one location. pageSize is handled by requesting <168 hours."""
+async def fetch_one_location(retry_client, lat, lon, period): # <-- Now accepts retry_client
+    """Fetches data for one location using the resilient retry client."""
     api_url = f"https://airquality.googleapis.com/v1/history:lookup?key={GOOGLE_API_KEY}"
-    # The API is capped at 168 hours. Our 7-day (168h) request chunking respects this.
     payload = {"location": {"latitude": lat, "longitude": lon}, "period": period, "pageSize": 168}
     try:
-        async with session.post(api_url, json=payload) as response:
+        # Use the retry_client instead of a plain session
+        async with retry_client.post(api_url, json=payload) as response:
             response.raise_for_status()
             data = await response.json()
             records = []
@@ -68,10 +62,11 @@ async def fetch_one_location(session, lat, lon, period):
                 })
             return records
     except Exception as e:
-        print(f"  - Error fetching {lat},{lon}: {e}"); return []
+        # This will now only print if all retry attempts fail.
+        print(f"  - FINAL ERROR after retries for {lat},{lon}: {e}"); return []
 
+# --- load_to_bigquery and aggregate_and_publish (Unchanged) ---
 def load_to_bigquery(records, bq_client):
-    """Loads records idempotently using a MERGE statement."""
     if not records:
         print("No new records to load. Skipping BigQuery load."); return
 
@@ -103,7 +98,6 @@ def load_to_bigquery(records, bq_client):
     print(f"Successfully merged {merge_job.num_dml_affected_rows} new rows. Temp table deleted.")
 
 def aggregate_and_publish():
-    """Aggregates data by month and all-time, then uploads to GCS."""
     print("--- Aggregating All Data for Map ---")
     client = bigquery.Client(project=GCP_PROJECT_ID)
     query = f"""
@@ -127,70 +121,74 @@ def aggregate_and_publish():
         lat, lon = round(row["latitude"], 5), round(row["longitude"], 5)
         key = (lat, lon)
         if key not in locations_dict: locations_dict[key] = {"latitude": lat, "longitude": lon, "stats": {}}
-        
         timeframe = row["timeframe"]
         all_timeframes.add(timeframe)
-        
         locations_dict[key]["stats"][timeframe] = { 
             "median_aqi": None if pd.isna(row["median_aqi"]) else int(row["median_aqi"]), 
             "max_aqi": None if pd.isna(row["max_aqi"]) else int(row["max_aqi"]), 
             "min_aqi": None if pd.isna(row["min_aqi"]) else int(row["min_aqi"]), 
             "point_count": int(row["point_count"]) 
         }
-
     final_json_payload = { "timeframes": sorted(list(all_timeframes)), "locations": list(locations_dict.values()) }
     storage_client = storage.Client(project=GCP_PROJECT_ID)
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
     blob = bucket.blob("map_data.json")
-    blob.cache_control = "no-cache" # Ensure browsers always get the latest file
+    blob.cache_control = "no-cache"
     blob.upload_from_string(json.dumps(final_json_payload), content_type='application/json')
     blob.make_public()
     print(f"Upload complete. Map data is now live at: {blob.public_url}")
 
 
 async def main(args):
+    # --- Set up the resilient retry client ---
+    retry_options = ExponentialRetry(
+        attempts=5,          # Try up to 5 times
+        start_timeout=1,     # Wait 1s, then 2s, 4s, 8s...
+        max_timeout=30,      # Max wait time is 30s
+        factor=2.0,
+        jitter="full",       # Add randomness to avoid thundering herd
+        retry_for_statuses=[429, 503, 504] # Retry on these specific errors
+    )
+    # The client will manage its own session
+    retry_client = RetryClient(retry_options=retry_options, raise_for_status=True)
+
     if not os.path.exists(LOCATIONS_FILE):
         print(f"FATAL: Locations file '{LOCATIONS_FILE}' not found."); return
-
+    
     locations_df = pd.read_csv(LOCATIONS_FILE)
     bq_client = bigquery.Client(project=GCP_PROJECT_ID)
 
     if args.backfill_months:
-        # --- MASSIVE BACKFILL MODE ---
         print(f"--- Running in MASSIVE BACKFILL Mode for {args.backfill_months} months ---")
         for i in range(1, int(args.backfill_months) + 1):
             period = get_time_period(month_offset=i, days=7)
             print(f"\n--- Processing Month Offset: {i} | Period: {period['startTime']} to {period['endTime']} ---")
             all_records = []
-            async with aiohttp.ClientSession() as session:
-                tasks = [fetch_one_location(session, row['latitude'], row['longitude'], period) for _, row in locations_df.iterrows()]
-                results = await asyncio.gather(*tasks)
-                for res in results: all_records.extend(res)
+            tasks = [fetch_one_location(retry_client, row['latitude'], row['longitude'], period) for _, row in locations_df.iterrows()]
+            results = await asyncio.gather(*tasks)
+            for res in results: all_records.extend(res)
             print(f"Fetched {len(all_records)} records for this period.")
             if all_records:
                 load_to_bigquery(all_records, bq_client)
     else:
         # --- STAGGERED WEEKLY INGESTION MODE ---
         print("--- Running in Staggered Weekly Ingestion Mode ---")
-        # Determine which group (0, 1, 2, or 3) to run this week
         current_group = datetime.now(timezone.utc).isocalendar()[1] % NUM_GROUPS
         print(f"Processing group #{current_group} of {NUM_GROUPS}.")
-        
         locations_df['group'] = locations_df.index % NUM_GROUPS
         locations_to_process = locations_df[locations_df['group'] == current_group]
         
-        period = get_time_period(month_offset=0, days=7) # Always get the last 7 days for the current week's group
+        period = get_time_period(month_offset=0, days=7)
         print(f"Fetching data for {len(locations_to_process)} locations for period: {period['startTime']} to {period['endTime']}")
         
         all_records = []
-        async with aiohttp.ClientSession() as session:
-            tasks = [fetch_one_location(session, row['latitude'], row['longitude'], period) for _, row in locations_to_process.iterrows()]
-            results = await asyncio.gather(*tasks)
-            for res in results: all_records.extend(res)
-        
+        tasks = [fetch_one_location(retry_client, row['latitude'], row['longitude'], period) for _, row in locations_to_process.iterrows()]
+        results = await asyncio.gather(*tasks)
+        for res in results: all_records.extend(res)
         if all_records:
             load_to_bigquery(all_records, bq_client)
 
+    await retry_client.close() # Cleanly close the session
     print("\n--- Final Aggregation Step ---")
     aggregate_and_publish()
     print("--- Process Complete! ---")

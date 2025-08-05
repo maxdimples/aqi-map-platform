@@ -1,7 +1,12 @@
+# requirements.txt
+
 # Core
 requests
 aiohttp
 pandas
+
+# Retry Logic
+aiohttp-retry
 
 # Google Cloud
 google-cloud-bigquery
