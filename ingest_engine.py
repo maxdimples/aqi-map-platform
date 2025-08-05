@@ -95,20 +95,30 @@ def load_to_bigquery(records, bq_client):
 def aggregate_and_publish():
     print("--- Aggregating All Data for Map ---")
     client = bigquery.Client(project=GCP_PROJECT_ID)
+    
+    # OPTIMIZED QUERY: Uses AVG for decimal precision and ROUND for clean output.
     query = f"""
         WITH all_time_stats AS (
-            SELECT 'All Time' AS timeframe, latitude, longitude,
-                APPROX_QUANTILES(aqi, 2)[OFFSET(1)] AS median_aqi, MAX(aqi) AS max_aqi, MIN(aqi) AS min_aqi, COUNTIF(aqi IS NOT NULL) AS point_count
+            SELECT 
+                'All Time' AS timeframe, latitude, longitude,
+                ROUND(AVG(CAST(aqi AS FLOAT64)), 2) AS median_aqi,
+                CAST(MAX(aqi) AS FLOAT64) AS max_aqi,
+                CAST(MIN(aqi) AS FLOAT64) AS min_aqi,
+                COUNTIF(aqi IS NOT NULL) AS point_count
             FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}` WHERE latitude IS NOT NULL GROUP BY latitude, longitude
         ),
         month_stats AS (
-            SELECT FORMAT_TIMESTAMP('%Y-%m (%B)', datetime) AS timeframe, latitude, longitude,
-                APPROX_QUANTILES(aqi, 2)[OFFSET(1)] AS median_aqi, MAX(aqi) AS max_aqi, MIN(aqi) AS min_aqi, COUNTIF(aqi IS NOT NULL) AS point_count
+            SELECT 
+                FORMAT_TIMESTAMP('%Y-%m (%B)', datetime) AS timeframe, latitude, longitude,
+                ROUND(AVG(CAST(aqi AS FLOAT64)), 2) AS median_aqi,
+                CAST(MAX(aqi) AS FLOAT64) AS max_aqi,
+                CAST(MIN(aqi) AS FLOAT64) AS min_aqi,
+                COUNTIF(aqi IS NOT NULL) AS point_count
             FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}` WHERE latitude IS NOT NULL GROUP BY timeframe, latitude, longitude
         )
         SELECT * FROM all_time_stats UNION ALL SELECT * FROM month_stats
     """
-    print("Executing aggregation query...")
+    print("Executing refined aggregation query...")
     results_df = client.query(query).to_dataframe()
     
     locations_dict, all_timeframes = {}, set()
@@ -118,17 +128,21 @@ def aggregate_and_publish():
         if key not in locations_dict: locations_dict[key] = {"latitude": lat, "longitude": lon, "stats": {}}
         timeframe = row["timeframe"]
         all_timeframes.add(timeframe)
+        
+        # SIMPLIFIED: No need for int casting, handles floats and nulls correctly.
         locations_dict[key]["stats"][timeframe] = { 
-            "median_aqi": None if pd.isna(row["median_aqi"]) else int(row["median_aqi"]), 
-            "max_aqi": None if pd.isna(row["max_aqi"]) else int(row["max_aqi"]), 
-            "min_aqi": None if pd.isna(row["min_aqi"]) else int(row["min_aqi"]), 
+            "median_aqi": None if pd.isna(row["median_aqi"]) else row["median_aqi"], 
+            "max_aqi": None if pd.isna(row["max_aqi"]) else row["max_aqi"], 
+            "min_aqi": None if pd.isna(row["min_aqi"]) else row["min_aqi"], 
             "point_count": int(row["point_count"]) 
         }
+        
     final_json_payload = { "timeframes": sorted(list(all_timeframes)), "locations": list(locations_dict.values()) }
+    
     storage_client = storage.Client(project=GCP_PROJECT_ID)
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
     blob = bucket.blob("map_data.json")
-    blob.cache_control = "no-cache"
+    blob.cache_control = "no-cache" # Aggressively prevent caching
     blob.upload_from_string(json.dumps(final_json_payload), content_type='application/json')
     blob.make_public()
     print(f"Upload complete. Map data is now live at: {blob.public_url}")
