@@ -1,8 +1,8 @@
-# ingest_engine.py (Corrected)
+# ingest_engine.py
 
 import asyncio
 import aiohttp
-from aiohttp_retry import RetryClient, JitterRetry # <-- CORRECTED: Import JitterRetry
+from aiohttp_retry import RetryClient, JitterRetry
 import os
 import pandas as pd
 import json
@@ -13,7 +13,11 @@ from dateutil.relativedelta import relativedelta
 import uuid
 
 # --- Configuration ---
-MAX_CONCURRENT_REQUESTS = 50 
+# BEST PRACTICE: Throttle well within the 6,000 reqs/min limit.
+# 1000 requests every 21 seconds = ~2850 requests/minute.
+CHUNK_SIZE = 1000
+DELAY_BETWEEN_CHUNKS = 21 
+
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME") 
@@ -132,14 +136,10 @@ def aggregate_and_publish():
     blob.make_public()
     print(f"Upload complete. Map data is now live at: {blob.public_url}")
 
+
 async def main(args):
-    # --- CORRECTED: Use JitterRetry for randomized backoff ---
     retry_options = JitterRetry(
-        attempts=5,
-        start_timeout=1,
-        max_timeout=30,
-        factor=2.0,
-        statuses=[429, 503, 504]
+        attempts=10, start_timeout=2, max_timeout=60, factor=2.5, statuses=[429, 503, 504]
     )
     retry_client = RetryClient(retry_options=retry_options, raise_for_status=False)
 
@@ -147,33 +147,45 @@ async def main(args):
         print(f"FATAL: Locations file '{LOCATIONS_FILE}' not found."); return
     
     locations_df = pd.read_csv(LOCATIONS_FILE)
+    locations_to_process = locations_df.to_dict('records')
     bq_client = bigquery.Client(project=GCP_PROJECT_ID)
 
-    if args.backfill_months:
-        print(f"--- Running in MASSIVE BACKFILL Mode for {args.backfill_months} months ---")
-        for i in range(1, int(args.backfill_months) + 1):
-            period = get_time_period(month_offset=i, days=7)
-            print(f"\n--- Processing Month Offset: {i} | Period: {period['startTime']} to {period['endTime']} ---")
-            all_records = []
-            tasks = [fetch_one_location(retry_client, row['latitude'], row['longitude'], period) for _, row in locations_df.iterrows()]
+    if args.month_offset is not None:
+        # --- RESUMABLE BACKFILL MODE ---
+        period = get_time_period(month_offset=args.month_offset, days=7)
+        print(f"\n--- Backfilling Month Offset: {args.month_offset} | Period: {period['startTime']} to {period['endTime']} ---")
+        
+        all_records = []
+        chunks = [locations_to_process[i:i + CHUNK_SIZE] for i in range(0, len(locations_to_process), CHUNK_SIZE)]
+        
+        for index, chunk in enumerate(chunks):
+            print(f"  - Processing chunk {index + 1} of {len(chunks)} ({len(chunk)} locations)...")
+            tasks = [fetch_one_location(retry_client, loc['latitude'], loc['longitude'], period) for loc in chunk]
             results = await asyncio.gather(*tasks)
             for res in results: all_records.extend(res)
-            print(f"Fetched {len(all_records)} records for this period.")
-            if all_records:
-                load_to_bigquery(all_records, bq_client)
+            
+            if index < len(chunks) - 1:
+                print(f"  - Chunk complete. Throttling for {DELAY_BETWEEN_CHUNKS} seconds...")
+                await asyncio.sleep(DELAY_BETWEEN_CHUNKS)
+
+        print(f"Fetched {len(all_records)} total records for this month.")
+        if all_records:
+            load_to_bigquery(all_records, bq_client)
     else:
         # --- STAGGERED WEEKLY INGESTION MODE ---
         print("--- Running in Staggered Weekly Ingestion Mode ---")
+        # (No changes needed for this logic)
+        NUM_GROUPS = 4
         current_group = datetime.now(timezone.utc).isocalendar()[1] % NUM_GROUPS
         print(f"Processing group #{current_group} of {NUM_GROUPS}.")
         locations_df['group'] = locations_df.index % NUM_GROUPS
-        locations_to_process = locations_df[locations_df['group'] == current_group]
+        locations_to_process_df = locations_df[locations_df['group'] == current_group]
         
         period = get_time_period(month_offset=0, days=7)
-        print(f"Fetching data for {len(locations_to_process)} locations for period: {period['startTime']} to {period['endTime']}")
+        print(f"Fetching data for {len(locations_to_process_df)} locations...")
         
         all_records = []
-        tasks = [fetch_one_location(retry_client, row['latitude'], row['longitude'], period) for _, row in locations_to_process.iterrows()]
+        tasks = [fetch_one_location(retry_client, row['latitude'], row['longitude'], period) for _, row in locations_to_process_df.iterrows()]
         results = await asyncio.gather(*tasks)
         if all_records:
             load_to_bigquery(all_records, bq_client)
@@ -185,6 +197,6 @@ async def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="AQI Ingestion and Backfill Engine.")
-    parser.add_argument("--backfill-months", type=int, help="Number of past months to backfill with a 7-day snapshot each.")
+    parser.add_argument("--month-offset", type=int, help="Which past month to backfill (1=last month, 2=month before, etc.). Omit for weekly run.")
     args = parser.parse_args()
     asyncio.run(main(args))
