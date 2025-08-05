@@ -1,8 +1,8 @@
-# ingest_engine.py
+# ingest_engine.py (Corrected)
 
 import asyncio
 import aiohttp
-from aiohttp_retry import RetryClient, ExponentialRetry # <-- Import the retry library
+from aiohttp_retry import RetryClient, ExponentialRetry # Import the retry library
 import os
 import pandas as pd
 import json
@@ -13,8 +13,7 @@ from dateutil.relativedelta import relativedelta
 import uuid
 
 # --- Configuration ---
-# Moto: Optimize -> Reduce concurrency to a safer level as a first line of defense.
-MAX_CONCURRENT_REQUESTS = 50 # <-- REDUCED from 250 to 50
+MAX_CONCURRENT_REQUESTS = 50 
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")
 GCP_PROJECT_ID = os.environ.get("GCP_PROJECT_ID")
 GCS_BUCKET_NAME = os.environ.get("GCS_BUCKET_NAME") 
@@ -30,7 +29,6 @@ SCHEMA = [
     bigquery.SchemaField("category", "STRING", mode="NULLABLE"),
 ]
 
-# --- get_time_period (Unchanged) ---
 def get_time_period(month_offset=0, days=7):
     today = datetime.now(timezone.utc)
     target_month = today - relativedelta(months=month_offset)
@@ -42,12 +40,10 @@ def get_time_period(month_offset=0, days=7):
         "endTime": end_time.strftime('%Y-%m-%dT%H:%M:%SZ')
     }
 
-async def fetch_one_location(retry_client, lat, lon, period): # <-- Now accepts retry_client
-    """Fetches data for one location using the resilient retry client."""
+async def fetch_one_location(retry_client, lat, lon, period):
     api_url = f"https://airquality.googleapis.com/v1/history:lookup?key={GOOGLE_API_KEY}"
     payload = {"location": {"latitude": lat, "longitude": lon}, "period": period, "pageSize": 168}
     try:
-        # Use the retry_client instead of a plain session
         async with retry_client.post(api_url, json=payload) as response:
             response.raise_for_status()
             data = await response.json()
@@ -62,10 +58,8 @@ async def fetch_one_location(retry_client, lat, lon, period): # <-- Now accepts 
                 })
             return records
     except Exception as e:
-        # This will now only print if all retry attempts fail.
         print(f"  - FINAL ERROR after retries for {lat},{lon}: {e}"); return []
 
-# --- load_to_bigquery and aggregate_and_publish (Unchanged) ---
 def load_to_bigquery(records, bq_client):
     if not records:
         print("No new records to load. Skipping BigQuery load."); return
@@ -138,19 +132,17 @@ def aggregate_and_publish():
     blob.make_public()
     print(f"Upload complete. Map data is now live at: {blob.public_url}")
 
-
 async def main(args):
-    # --- Set up the resilient retry client ---
+    # --- CORRECTED: Set up the resilient retry client ---
     retry_options = ExponentialRetry(
-        attempts=5,          # Try up to 5 times
-        start_timeout=1,     # Wait 1s, then 2s, 4s, 8s...
-        max_timeout=30,      # Max wait time is 30s
+        attempts=5,
+        start_timeout=1.0,
+        max_timeout=30.0,
         factor=2.0,
-        jitter="full",       # Add randomness to avoid thundering herd
-        retry_for_statuses=[429, 503, 504] # Retry on these specific errors
+        statuses=[429, 503, 504], # Retry on these specific server/rate-limit errors
+        random_interval=1.0 # CORRECT KEYWORD: Adds up to 1 second of random jitter
     )
-    # The client will manage its own session
-    retry_client = RetryClient(retry_options=retry_options, raise_for_status=True)
+    retry_client = RetryClient(retry_options=retry_options, raise_for_status=False) # Let our code handle final errors
 
     if not os.path.exists(LOCATIONS_FILE):
         print(f"FATAL: Locations file '{LOCATIONS_FILE}' not found."); return
@@ -184,11 +176,10 @@ async def main(args):
         all_records = []
         tasks = [fetch_one_location(retry_client, row['latitude'], row['longitude'], period) for _, row in locations_to_process.iterrows()]
         results = await asyncio.gather(*tasks)
-        for res in results: all_records.extend(res)
         if all_records:
             load_to_bigquery(all_records, bq_client)
 
-    await retry_client.close() # Cleanly close the session
+    await retry_client.close()
     print("\n--- Final Aggregation Step ---")
     aggregate_and_publish()
     print("--- Process Complete! ---")

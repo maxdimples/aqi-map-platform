@@ -5,8 +5,8 @@ requests
 aiohttp
 pandas
 
-# Retry Logic - Pinning to a modern version that supports jitter
-aiohttp-retry>=3.0.0
+# Retry Logic
+aiohttp-retry
 
 # Google Cloud
 google-cloud-bigquery
