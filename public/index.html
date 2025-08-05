@@ -8,11 +8,12 @@
     <style>
         body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; flex-direction: column; height: 100vh; }
         #map { flex-grow: 1; background-color: #f0f0f0; }
-        #controls { background: #fff; padding: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.3); z-index: 1000; display: flex; justify-content: center; align-items: center; }
+        #controls { background: #fff; padding: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.3); z-index: 1000; display: flex; justify-content: center; align-items: center; gap: 20px; flex-wrap: wrap; }
         .leaflet-popup-content { width: 250px !important; }
         .popup-line { margin: 2px 0; font-size: 14px; }
-        select { font-size: 16px; padding: 5px; }
+        select, input { font-size: 16px; padding: 5px; }
         hr { border: 0; border-top: 1px solid #ddd; margin: 5px 0; }
+        .aqi-filter-group input[type="number"] { width: 65px; }
     </style>
 </head>
 <body>
@@ -22,13 +23,21 @@
         <label for="timeframe-select">Timeframe:</label>
         <select id="timeframe-select"></select>
     </div>
+    <!-- FILTER CONTROLS RE-IMPLEMENTED WITH DECIMAL PRECISION -->
+    <div class="aqi-filter-group">
+        <label>Median AQI Range:</label>
+        <input type="number" id="min-aqi-input" min="0" max="150" value="0" step="0.01">
+        <input type="range" id="min-aqi-slider" min="0" max="150" value="0" step="0.01">
+        <span>-</span>
+        <input type="range" id="max-aqi-slider" min="0" max="150" value="150" step="0.01">
+        <input type="number" id="max-aqi-input" min="0" max="150" value="150" step="0.01">
+    </div>
 </div>
 <div id="map"></div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
     const GCS_BUCKET_NAME = "aqi-history-platform";
-    // Bust the cache every time the page is loaded to get fresh data
     const DATA_URL = `https://storage.googleapis.com/${GCS_BUCKET_NAME}/map_data.json?v=${new Date().getTime()}`;
     
     const map = L.map('map').setView([40.7128, -74.0060], 8);
@@ -38,70 +47,128 @@
 
     let mapData = null;
     const layerGroup = L.layerGroup().addTo(map);
+
+    // --- References to all UI controls ---
     const timeframeSelect = document.getElementById('timeframe-select');
+    const minAqiSlider = document.getElementById('min-aqi-slider');
+    const maxAqiSlider = document.getElementById('max-aqi-slider');
+    const minAqiInput = document.getElementById('min-aqi-input');
+    const maxAqiInput = document.getElementById('max-aqi-input');
 
     // UDAQI Scale: Higher is better.
     function getColor(aqi) {
-        if (aqi === null || isNaN(aqi)) return '#999999'; // Grey for unknown
+        if (aqi === null || isNaN(aqi)) return '#999999';
         return aqi > 66 ? '#91cf60' : aqi > 33 ? '#fee08b' : '#fc8d59';
     }
+    
+    function formatValue(value, decimals = 2) {
+        if (value === null || typeof value === 'undefined') return 'N/A';
+        return value.toFixed(decimals);
+    }
 
-    // --- STREAMLINED MAP RENDERING LOGIC ---
     function updateMap() {
         const selectedTimeframe = timeframeSelect.value;
+        // --- Use parseFloat for precision filtering ---
+        const minAqi = parseFloat(minAqiInput.value);
+        const maxAqi = parseFloat(maxAqiInput.value);
+
         layerGroup.clearLayers();
         if (!mapData || !mapData.locations) return;
 
         mapData.locations.forEach(point => {
-            // Only render points that have data for the selected timeframe
             if (!point.stats || !point.stats[selectedTimeframe]) return;
             
             const stats = point.stats[selectedTimeframe];
             const medianAqi = stats.median_aqi;
-            const googleMapsLink = `https://www.google.com/maps?q=${point.latitude},${point.longitude}`;
+            
+            // --- CORE FILTERING LOGIC ---
+            if (medianAqi === null || medianAqi < minAqi || medianAqi > maxAqi) {
+                return; 
+            }
 
-            // --- UPDATED POPUP FORMAT ---
+            const googleMapsLink = `https://www.google.com/maps?q=${point.latitude},${point.longitude}`;
             const popupContent = `
                 <b>Location:</b> <a href="${googleMapsLink}" target="_blank">(${point.latitude.toFixed(4)}, ${point.longitude.toFixed(4)})</a>
                 <hr>
                 <b>Timeframe: ${selectedTimeframe}</b>
-                <div class="popup-line"><b>Avg AQI:</b> ${medianAqi !== null ? medianAqi.toFixed(2) : 'N/A'}</div>
-                <div class="popup-line"><b>Min/Max AQI:</b> ${stats.min_aqi !== null ? stats.min_aqi.toFixed(2) : 'N/A'} / ${stats.max_aqi !== null ? stats.max_aqi.toFixed(2) : 'N/A'}</div>
+                <div class="popup-line"><b>Median AQI (Typical):</b> ${formatValue(stats.median_aqi, 2)}</div>
+                <div class="popup-line"><b>Average AQI (Total):</b> ${formatValue(stats.avg_aqi, 2)}</div>
+                <div class="popup-line"><b>Min/Max AQI:</b> ${formatValue(stats.min_aqi, 2)} / ${formatValue(stats.max_aqi, 2)}</div>
                 <div class="popup-line"><b>Data Points:</b> ${stats.point_count ?? 'N/A'}</div>
             `;
 
             L.circleMarker([point.latitude, point.longitude], {
-                radius: 4, fillColor: getColor(medianAqi), color: "#000",
+                radius: 4, 
+                fillColor: getColor(medianAqi),
+                color: "#000",
                 weight: 0.5, opacity: 1, fillOpacity: 0.8
             }).bindPopup(popupContent).addTo(layerGroup);
         });
     }
 
-    // --- MAIN DATA FETCH ---
+    // --- Event listeners for synchronized float controls ---
+    function setupEventListeners() {
+        timeframeSelect.addEventListener('change', updateMap);
+
+        minAqiSlider.addEventListener('input', (e) => {
+            const minValue = parseFloat(e.target.value);
+            const maxValue = parseFloat(maxAqiSlider.value);
+            minAqiInput.value = formatValue(minValue);
+            if (minValue > maxValue) {
+                maxAqiSlider.value = minValue;
+                maxAqiInput.value = formatValue(minValue);
+            }
+            updateMap();
+        });
+
+        maxAqiSlider.addEventListener('input', (e) => {
+            const maxValue = parseFloat(e.target.value);
+            const minValue = parseFloat(minAqiSlider.value);
+            maxAqiInput.value = formatValue(maxValue);
+            if (maxValue < minValue) {
+                minAqiSlider.value = maxValue;
+                minAqiInput.value = formatValue(maxValue);
+            }
+            updateMap();
+        });
+
+        minAqiInput.addEventListener('change', (e) => {
+            let minValue = parseFloat(e.target.value);
+            const maxValue = parseFloat(maxAqiInput.value);
+            if (isNaN(minValue)) minValue = 0;
+            if (minValue > maxValue) minValue = maxValue;
+            e.target.value = formatValue(minValue);
+            minAqiSlider.value = minValue;
+            updateMap();
+        });
+
+        maxAqiInput.addEventListener('change', (e) => {
+            let maxValue = parseFloat(e.target.value);
+            const minValue = parseFloat(minAqiInput.value);
+            if (isNaN(maxValue)) maxValue = 150;
+            if (maxValue < minValue) maxValue = minValue;
+            e.target.value = formatValue(maxValue);
+            maxAqiSlider.value = maxValue;
+            updateMap();
+        });
+    }
+
     fetch(DATA_URL)
         .then(response => response.json())
         .then(data => {
             mapData = data;
-            
             data.timeframes.forEach(tf => {
                 const option = document.createElement('option');
-                option.value = tf;
-                option.textContent = tf;
+                option.value = tf; option.textContent = tf;
                 timeframeSelect.appendChild(option);
             });
-
-            timeframeSelect.addEventListener('change', updateMap);
-            
-            // Set default view and render
             if (data.timeframes.includes("All Time")) {
                 timeframeSelect.value = "All Time";
             }
-            updateMap();
+            setupEventListeners();
+            updateMap(); // Initial render
         })
-        .catch(error => {
-            console.error('Error loading map data:', error);
-            document.getElementById('map').innerHTML = `<h2 style="text-align:center; color:red;">Failed to load map data. See console.</h2>`;
-        });
+        .catch(error => console.error('Error loading map data:', error));
 </script>
 </body>
 </html>

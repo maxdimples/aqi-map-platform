@@ -1,0 +1,43 @@
+name: Manual Map Data Refresh
+
+on:
+  workflow_dispatch:
+
+env:
+  GCP_PROJECT_ID: aqi-history-platform
+  GCS_BUCKET_NAME: aqi-history-platform
+
+jobs:
+  refresh-map-data:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: 'read'
+      id-token: 'write'
+
+    steps:
+    - name: Checkout Repository
+      uses: actions/checkout@v4
+
+    - name: Authenticate to Google Cloud
+      uses: 'google-github-actions/auth@v2'
+      with:
+        # Your existing workflows use a service account key.
+        # This is consistent with that pattern.
+        credentials_json: '${{ secrets.GCP_SA_KEY }}'
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+        cache: 'pip'
+
+    - name: Install Python Dependencies
+      run: pip install -r requirements.txt
+
+    - name: Run Map Data Refresh Script
+      # This script runs the aggregation query and uploads the result to GCS.
+      # Note: GOOGLE_API_KEY is NOT needed here, as we are not fetching new data.
+      run: python refresh_map_data.py
+      env:
+        GCP_PROJECT_ID: ${{ env.GCP_PROJECT_ID }}
+        GCS_BUCKET_NAME: ${{ env.GCS_BUCKET_NAME }}

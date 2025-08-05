@@ -1,11 +1,16 @@
-# requirements.txt
-requests
+# Core libraries for HTTP requests
 aiohttp
 aiohttp-retry
+
+# Data manipulation
 pandas
+python-dateutil
+
+# Google Cloud SDK
 google-cloud-bigquery
 google-cloud-storage
-google-cloud-bigquery-storage # <-- Add this line
+
+# Performance enhancers for BigQuery & Pandas
+google-cloud-bigquery-storage
 pandas-gbq
 db-dtypes
-python-dateutil
