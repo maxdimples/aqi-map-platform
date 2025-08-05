@@ -1,23 +1,11 @@
 # requirements.txt
-
-# Core
 requests
 aiohttp
-pandas
-
-# Retry Logic
 aiohttp-retry
-
-# Google Cloud
+pandas
 google-cloud-bigquery
 google-cloud-storage
-google-cloud-bigquery-storage # <-- FIX: Add for faster BQ downloads
+google-cloud-bigquery-storage # <-- Add this line
 pandas-gbq
 db-dtypes
-
-# Geospatial (if needed for other scripts)
-geopandas
-numpy
-shapely
-scipy
-folium
+python-dateutil

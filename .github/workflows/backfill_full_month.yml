@@ -1,19 +1,19 @@
-name: Manual Monthly Backfill
+name: Baseline Full Month Backfill
 
 on:
   workflow_dispatch:
     inputs:
-      month_offset:
-        description: 'Which past month to fetch (1=last month, 2=month before, etc.)'
+      month_to_backfill:
+        description: 'The full month to backfill (Format: YYYY-MM)'
         required: true
-        default: '1'
+        default: '2025-07'
 
 env:
   GCP_PROJECT_ID: aqi-history-platform
   GCS_BUCKET_NAME: aqi-history-platform
 
 jobs:
-  backfill-single-month:
+  backfill-full-month:
     runs-on: ubuntu-latest
     permissions:
       contents: 'read'
@@ -37,9 +37,9 @@ jobs:
     - name: Install Python Dependencies
       run: pip install -r requirements.txt
 
-    - name: Run Backfill Script for One Month
+    - name: Run Full Month Backfill Script
       run: |
-        python ingest_engine.py --month-offset ${{ github.event.inputs.month_offset }}
+        python backfill_engine.py --month ${{ github.event.inputs.month_to_backfill }}
       env:
         GCP_PROJECT_ID: ${{ env.GCP_PROJECT_ID }}
         GCS_BUCKET_NAME: ${{ env.GCS_BUCKET_NAME }}

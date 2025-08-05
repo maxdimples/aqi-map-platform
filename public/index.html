@@ -12,7 +12,7 @@
         .leaflet-popup-content { width: 220px !important; }
         .popup-line { margin: 2px 0; font-size: 14px; }
         select, input { font-size: 16px; padding: 5px; }
-        #aqi-filter-value { font-weight: bold; width: 50px; } /* Changed for number input */
+        .aqi-filter-group input[type="number"] { width: 55px; }
     </style>
 </head>
 <body>
@@ -22,10 +22,13 @@
         <label for="timeframe-select">Timeframe:</label>
         <select id="timeframe-select"></select>
     </div>
-    <div>
-        <label for="aqi-filter">Min Median AQI:</label>
-        <input type="range" id="aqi-filter" min="0" max="100" value="0" step="1">
-        <input type="number" id="aqi-filter-value" min="0" max="100" value="0">
+    <div class="aqi-filter-group">
+        <label>Median AQI Range:</label>
+        <input type="number" id="min-aqi-input" min="0" max="100" value="0">
+        <input type="range" id="min-aqi-slider" min="0" max="100" value="0" step="1">
+        <span>-</span>
+        <input type="range" id="max-aqi-slider" min="0" max="100" value="100" step="1">
+        <input type="number" id="max-aqi-input" min="0" max="100" value="100">
     </div>
 </div>
 <div id="map"></div>
@@ -43,18 +46,24 @@
     let mapData = null;
     const layerGroup = L.layerGroup().addTo(map);
 
+    // --- References to all new UI controls ---
     const timeframeSelect = document.getElementById('timeframe-select');
-    const aqiFilterSlider = document.getElementById('aqi-filter');
-    const aqiFilterInput = document.getElementById('aqi-filter-value');
+    const minAqiSlider = document.getElementById('min-aqi-slider');
+    const maxAqiSlider = document.getElementById('max-aqi-slider');
+    const minAqiInput = document.getElementById('min-aqi-input');
+    const maxAqiInput = document.getElementById('max-aqi-input');
 
+    // UDAQI Scale: Higher is better.
     function getColor(aqi) {
-        if (aqi === null || isNaN(aqi)) return '#999999';
+        if (aqi === null || isNaN(aqi)) return '#999999'; // Grey for unknown
         return aqi > 66 ? '#91cf60' : aqi > 33 ? '#fee08b' : '#fc8d59';
     }
 
+    // --- UPDATED: Main map rendering logic ---
     function updateMapFromControls() {
         const selectedTimeframe = timeframeSelect.value;
-        const minAqi = parseInt(aqiFilterInput.value, 10);
+        const minAqi = parseInt(minAqiInput.value, 10);
+        const maxAqi = parseInt(maxAqiInput.value, 10);
 
         layerGroup.clearLayers();
         if (!mapData || !mapData.locations) return;
@@ -65,7 +74,10 @@
             const stats = point.stats[selectedTimeframe];
             const medianAqi = stats.median_aqi;
             
-            if (medianAqi === null || medianAqi < minAqi) return;
+            // --- CORE LOGIC CHANGE: Filter by range ---
+            if (medianAqi === null || medianAqi < minAqi || medianAqi > maxAqi) {
+                return; 
+            }
 
             const popupContent = `
                 <b>Location</b><br>
@@ -84,22 +96,56 @@
         });
     }
 
-    // --- NEW: Sync slider and input box ---
-    aqiFilterSlider.addEventListener('input', (e) => {
-        aqiFilterInput.value = e.target.value;
+    // --- NEW: Event listeners to sync sliders and inputs ---
+    minAqiSlider.addEventListener('input', (e) => {
+        const minValue = parseInt(e.target.value, 10);
+        const maxValue = parseInt(maxAqiSlider.value, 10);
+        if (minValue > maxValue) {
+            e.target.value = maxValue;
+            minAqiInput.value = maxValue;
+        } else {
+            minAqiInput.value = minValue;
+        }
         updateMapFromControls();
     });
 
-    aqiFilterInput.addEventListener('input', (e) => {
-        aqiFilterSlider.value = e.target.value;
+    maxAqiSlider.addEventListener('input', (e) => {
+        const maxValue = parseInt(e.target.value, 10);
+        const minValue = parseInt(minAqiSlider.value, 10);
+        if (maxValue < minValue) {
+            e.target.value = minValue;
+            maxAqiInput.value = minValue;
+        } else {
+            maxAqiInput.value = maxValue;
+        }
         updateMapFromControls();
     });
+
+    minAqiInput.addEventListener('change', (e) => {
+        let minValue = parseInt(e.target.value, 10);
+        const maxValue = parseInt(maxAqiInput.value, 10);
+        if (minValue > maxValue) {
+            minValue = maxValue;
+            e.target.value = minValue;
+        }
+        minAqiSlider.value = minValue;
+        updateMapFromControls();
+    });
+
+    maxAqiInput.addEventListener('change', (e) => {
+        let maxValue = parseInt(e.target.value, 10);
+        const minValue = parseInt(minAqiInput.value, 10);
+        if (maxValue < minValue) {
+            maxValue = minValue;
+            e.target.value = maxValue;
+        }
+        maxAqiSlider.value = maxValue;
+        updateMapFromControls();
+    });
+
 
     fetch(DATA_URL)
-        .then(response => {
-            if (!response.ok) throw new Error(`HTTP error! status: ${response.status}`);
-            return response.json();
-        })
+        .then(response => response.json())
         .then(data => {
             mapData = data;
             
@@ -119,7 +165,7 @@
         })
         .catch(error => {
             console.error('Error loading map data:', error);
-            document.getElementById('map').innerHTML = `<h2 style="text-align:center; color:red;">Failed to load map data. See console for details.</h2>`;
+            document.getElementById('map').innerHTML = `<h2 style="text-align:center; color:red;">Failed to load map data.</h2>`;
         });
 </script>
 </body>
