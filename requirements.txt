@@ -11,6 +11,7 @@ aiohttp-retry
 # Google Cloud
 google-cloud-bigquery
 google-cloud-storage
+google-cloud-bigquery-storage # <-- FIX: Add for faster BQ downloads
 pandas-gbq
 db-dtypes
 
