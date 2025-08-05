@@ -1,4 +1,4 @@
-# Core libraries for HTTP requests
+# Core HTTP and async handling
 aiohttp
 aiohttp-retry
 

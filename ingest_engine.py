@@ -21,14 +21,16 @@ LOCATIONS_FILE = 'nyc_land_points_final.csv'
 MAX_CONCURRENT_REQUESTS = 50
 NUM_GROUPS = 4
 SCHEMA = [
-    bigquery.SchemaField("latitude", "FLOAT64", mode="NULLABLE"),
-    bigquery.SchemaField("longitude", "FLOAT64", mode="NULLABLE"),
-    bigquery.SchemaField("datetime", "TIMESTAMP", mode="NULLABLE"),
+    bigquery.SchemaField("latitude", "FLOAT64", mode="REQUIRED"),
+    bigquery.SchemaField("longitude", "FLOAT64", mode="REQUIRED"),
+    bigquery.SchemaField("datetime", "TIMESTAMP", mode="REQUIRED"),
     bigquery.SchemaField("aqi", "INTEGER", mode="NULLABLE"),
     bigquery.SchemaField("aqi_code", "STRING", mode="NULLABLE"),
     bigquery.SchemaField("category", "STRING", mode="NULLABLE"),
 ]
 
+# Initialize clients once to be reused
+storage_client = storage.Client(project=GCP_PROJECT_ID)
 
 def get_time_period(month_offset=0, days=7):
     today = datetime.now(timezone.utc)
@@ -48,6 +50,22 @@ async def fetch_one_location(retry_client, lat, lon, period):
         async with retry_client.post(api_url, json=payload) as response:
             response.raise_for_status()
             data = await response.json()
+            
+            # --- STAGING UPLOAD ---
+            # Save raw response to GCS for durability before processing.
+            # This is a critical data preservation step.
+            try:
+                bucket = storage_client.bucket(GCS_BUCKET_NAME)
+                # Sanitize datetime for GCS path
+                start_time_safe = period['startTime'].replace(":", "-")
+                blob_name = f"raw_responses/{start_time_safe}/{lat}_{lon}.json"
+                blob = bucket.blob(blob_name)
+                # Run the synchronous GCS upload in a thread pool to avoid blocking asyncio event loop
+                await asyncio.to_thread(blob.upload_from_string, json.dumps(data), content_type='application/json')
+            except Exception as gcs_e:
+                print(f"  - WARNING: GCS upload failed for {lat},{lon}: {gcs_e}")
+
+            # --- PARSING ---
             records = []
             for hour_info in data.get('hoursInfo', []):
                 dt_str, indexes = hour_info.get('dateTime'), hour_info.get('indexes', [])
@@ -72,6 +90,11 @@ def load_to_bigquery(records, bq_client):
     df = pd.DataFrame(records)
     df['datetime'] = pd.to_datetime(df['datetime'])
     df['aqi'] = pd.to_numeric(df['aqi'], errors='coerce').astype('Int64')
+    
+    df.dropna(subset=['latitude', 'longitude', 'datetime'], inplace=True)
+    if df.empty:
+        print("DataFrame is empty after cleaning. No data to load.")
+        return
 
     print(f"Loading {len(df)} records into temp table: {temp_table_id}")
     load_job = bq_client.load_table_from_dataframe(df, temp_table_id.strip('`'), job_config=bigquery.LoadJobConfig(schema=SCHEMA))
@@ -93,16 +116,13 @@ def load_to_bigquery(records, bq_client):
     print(f"Successfully merged {merge_job.num_dml_affected_rows} new rows. Temp table deleted.")
 
 def aggregate_and_publish():
-    print("--- Aggregating All Data for Map (Hybrid Float Model) ---")
+    print("--- Aggregating All Data for Map (Full Precision) ---")
     client = bigquery.Client(project=GCP_PROJECT_ID)
     
-    # THE DECISIVE QUERY UPGRADE: 
-    # Cast AQI to FLOAT64 before aggregation to ensure median and min/max are floats.
     query = f"""
         WITH all_time_stats AS (
             SELECT 
                 'All Time' AS timeframe, latitude, longitude,
-                -- CAST ensures the output of APPROX_QUANTILES is a FLOAT
                 ROUND(APPROX_QUANTILES(CAST(aqi AS FLOAT64), 2)[OFFSET(1)], 2) AS median_aqi,
                 ROUND(AVG(CAST(aqi AS FLOAT64)), 2) AS avg_aqi,
                 CAST(MAX(aqi) AS FLOAT64) AS max_aqi,
@@ -125,10 +145,9 @@ def aggregate_and_publish():
     print("Executing float-precision aggregation query...")
     results_df = client.query(query).to_dataframe()
     
-    # The rest of the function remains the same, but now it handles float inputs correctly.
     locations_dict, all_timeframes = {}, set()
     for _, row in results_df.iterrows():
-        lat, lon = round(row["latitude"], 5), round(row["longitude"], 5)
+        lat, lon = row["latitude"], row["longitude"]
         key = (lat, lon)
         if key not in locations_dict: locations_dict[key] = {"latitude": lat, "longitude": lon, "stats": {}}
         timeframe = row["timeframe"]
@@ -144,7 +163,6 @@ def aggregate_and_publish():
         
     final_json_payload = { "timeframes": sorted(list(all_timeframes)), "locations": list(locations_dict.values()) }
     
-    storage_client = storage.Client(project=GCP_PROJECT_ID)
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
     blob = bucket.blob("map_data.json")
     blob.cache_control = "no-cache"
@@ -152,34 +170,30 @@ def aggregate_and_publish():
     blob.make_public()
     print(f"Upload complete. Map data is now live at: {blob.public_url}")
 
-
 async def main():
-    # --- STAGGERED WEEKLY INGESTION MODE ---
     print("--- Running in Staggered Weekly Ingestion Mode ---")
     retry_options = JitterRetry(attempts=5, start_timeout=1, max_timeout=30, factor=2.0, statuses=[429, 503, 504])
-    retry_client = RetryClient(retry_options=retry_options, raise_for_status=False)
-
-    locations_df = pd.read_csv(LOCATIONS_FILE)
-    bq_client = bigquery.Client(project=GCP_PROJECT_ID)
     
-    current_group = datetime.now(timezone.utc).isocalendar()[1] % NUM_GROUPS
-    print(f"Processing group #{current_group} of {NUM_GROUPS}.")
-    locations_df['group'] = locations_df.index % NUM_GROUPS
-    locations_to_process = locations_df[locations_df['group'] == current_group]
-    
-    # Fetch the last 7 days of data
-    period = get_time_period(month_offset=0, days=7)
-    print(f"Fetching data for {len(locations_to_process)} locations for period: {period['startTime']} to {period['endTime']}")
-    
-    all_records = []
-    tasks = [fetch_one_location(retry_client, row['latitude'], row['longitude'], period) for _, row in locations_to_process.iterrows()]
-    results = await asyncio.gather(*tasks)
-    for res in results: all_records.extend(res)
+    async with RetryClient(retry_options=retry_options, raise_for_status=False) as retry_client:
+        locations_df = pd.read_csv(LOCATIONS_FILE)
+        bq_client = bigquery.Client(project=GCP_PROJECT_ID)
+        
+        current_group = datetime.now(timezone.utc).isocalendar()[1] % NUM_GROUPS
+        print(f"Processing group #{current_group} of {NUM_GROUPS}.")
+        locations_df['group'] = locations_df.index % NUM_GROUPS
+        locations_to_process = locations_df[locations_df['group'] == current_group]
+        
+        period = get_time_period(month_offset=0, days=7)
+        print(f"Fetching data for {len(locations_to_process)} locations for period: {period['startTime']} to {period['endTime']}")
+        
+        all_records = []
+        tasks = [fetch_one_location(retry_client, row['latitude'], row['longitude'], period) for _, row in locations_to_process.iterrows()]
+        results = await asyncio.gather(*tasks)
+        for res in results: all_records.extend(res)
 
-    if all_records:
-        load_to_bigquery(all_records, bq_client)
+        if all_records:
+            load_to_bigquery(all_records, bq_client)
 
-    await retry_client.close()
     print("\n--- Final Aggregation Step ---")
     aggregate_and_publish()
     print("--- Process Complete! ---")

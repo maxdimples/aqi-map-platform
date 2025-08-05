@@ -53,31 +53,20 @@
     const minAqiInput = document.getElementById('min-aqi-input');
     const maxAqiInput = document.getElementById('max-aqi-input');
 
-    /**
-     * DYNAMIC GRADIENT COLORING
-     * Calculates a color on a Red -> Yellow -> Green scale.
-     * Low AQI (bad air) is Red. High AQI (good air) is Green.
-     */
     function getGradientColor(aqi, minAqi, maxAqi) {
-        if (aqi === null || isNaN(aqi)) return '#999999'; // Grey for no data
-        if (maxAqi === minAqi) return '#ffc300'; // Middle yellow if all values are the same
+        if (aqi === null || isNaN(aqi)) return '#999999';
+        if (maxAqi === minAqi) return '#ffc300'; 
 
         const percentage = (aqi - minAqi) / (maxAqi - minAqi);
 
-        // We want Red (low) -> Yellow (mid) -> Green (high)
-        // Red is rgb(220, 60, 50)
-        // Yellow is rgb(255, 195, 0)
-        // Green is rgb(60, 180, 75)
         let red, green, blue;
         if (percentage < 0.5) {
-            // Interpolate from Red to Yellow
-            const p = percentage * 2; // Normalize to 0-1
+            const p = percentage * 2;
             red = 220 + (255 - 220) * p;
             green = 60 + (195 - 60) * p;
             blue = 50 + (0 - 50) * p;
         } else {
-            // Interpolate from Yellow to Green
-            const p = (percentage - 0.5) * 2; // Normalize to 0-1
+            const p = (percentage - 0.5) * 2;
             red = 255 + (60 - 255) * p;
             green = 195 + (180 - 195) * p;
             blue = 0 + (75 - 0) * p;
@@ -98,7 +87,6 @@
         layerGroup.clearLayers();
         if (!mapData || !mapData.locations) return;
 
-        // --- STEP 1: CALCULATE THE GLOBAL DATA RANGE FOR THE CURRENT TIMEFRAME ---
         const aqiValues = mapData.locations
             .map(point => point.stats[selectedTimeframe]?.median_aqi)
             .filter(aqi => aqi !== null && !isNaN(aqi));
@@ -106,21 +94,19 @@
         const globalMinAqi = aqiValues.length > 0 ? Math.min(...aqiValues) : 0;
         const globalMaxAqi = aqiValues.length > 0 ? Math.max(...aqiValues) : 150;
 
-        // --- STEP 2: RENDER THE MAP USING THE DYNAMIC RANGE ---
         mapData.locations.forEach(point => {
             if (!point.stats || !point.stats[selectedTimeframe]) return;
             
             const stats = point.stats[selectedTimeframe];
             const medianAqi = stats.median_aqi;
             
-            // Apply the user's slider/input filter
             if (medianAqi === null || medianAqi < minAqiFilter || medianAqi > maxAqiFilter) {
                 return; 
             }
 
             const googleMapsLink = `https://www.google.com/maps?q=${point.latitude},${point.longitude}`;
             const popupContent = `
-                <b>Location:</b> <a href="${googleMapsLink}" target="_blank">(${point.latitude.toFixed(4)}, ${point.longitude.toFixed(4)})</a>
+                <b>Location:</b> <a href="${googleMapsLink}" target="_blank">(${point.latitude.toFixed(6)}, ${point.longitude.toFixed(6)})</a>
                 <hr>
                 <b>Timeframe: ${selectedTimeframe}</b>
                 <div class="popup-line"><b>Median AQI (Typical):</b> ${formatValue(stats.median_aqi, 2)}</div>
@@ -131,18 +117,13 @@
 
             L.circleMarker([point.latitude, point.longitude], {
                 radius: 4, 
-                // Use the new gradient function with the calculated global range
                 fillColor: getGradientColor(medianAqi, globalMinAqi, globalMaxAqi),
                 color: "#000",
                 weight: 0.5, opacity: 1, fillOpacity: 0.8
             }).bindPopup(popupContent).addTo(layerGroup);
         });
     }
-
-    function setupEventListeners() {
-        // ... (Event listener setup remains unchanged)
-    }
-
+    
     fetch(DATA_URL)
         .then(response => response.json())
         .then(data => {
@@ -160,10 +141,8 @@
         })
         .catch(error => console.error('Error loading map data:', error));
 
-    // Re-paste the existing setupEventListeners function here as it doesn't need changes
     function setupEventListeners() {
         timeframeSelect.addEventListener('change', updateMap);
-
         minAqiSlider.addEventListener('input', (e) => {
             const minValue = parseFloat(e.target.value);
             const maxValue = parseFloat(maxAqiSlider.value);
@@ -174,7 +153,6 @@
             }
             updateMap();
         });
-
         maxAqiSlider.addEventListener('input', (e) => {
             const maxValue = parseFloat(e.target.value);
             const minValue = parseFloat(minAqiSlider.value);
@@ -185,7 +163,6 @@
             }
             updateMap();
         });
-
         minAqiInput.addEventListener('change', (e) => {
             let minValue = parseFloat(e.target.value);
             const maxValue = parseFloat(maxAqiInput.value);
@@ -195,7 +172,6 @@
             minAqiSlider.value = minValue;
             updateMap();
         });
-
         maxAqiInput.addEventListener('change', (e) => {
             let maxValue = parseFloat(e.target.value);
             const minValue = parseFloat(minAqiInput.value);

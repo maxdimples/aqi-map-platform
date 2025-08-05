@@ -1,18 +1,19 @@
-# ingest.yml
-name: Weekly AQI Ingestion
+name: Manual Data Reprocessing from GCS
 
 on:
   workflow_dispatch:
-  schedule:
-    # Runs at 05:00 UTC every Sunday. This is robust and consistent.
-    - cron: '0 5 * * SUN'
+    inputs:
+      gcs_path:
+        description: 'GCS path to reprocess (e.g., raw_responses/2025-07-25T23-59-59Z/)'
+        required: true
+        default: 'raw_responses/YYYY-MM-DDTHH-MM-SSZ/'
 
 env:
   GCP_PROJECT_ID: aqi-history-platform
-  GCS_BUCKET_NAME: aqi-history-platform 
+  GCS_BUCKET_NAME: aqi-history-platform
 
 jobs:
-  ingest-and-process:
+  reprocess-from-gcs:
     runs-on: ubuntu-latest
     permissions:
       contents: 'read'
@@ -35,10 +36,12 @@ jobs:
 
     - name: Install Python Dependencies
       run: pip install -r requirements.txt
-        
-    - name: Run Weekly Ingestion Engine
-      run: python ingest_engine.py
+
+    - name: Run Reprocessing Script
+      run: |
+        python reprocess_from_gcs.py \
+          --bucket ${{ env.GCS_BUCKET_NAME }} \
+          --path ${{ github.event.inputs.gcs_path }}
       env:
         GCP_PROJECT_ID: ${{ env.GCP_PROJECT_ID }}
-        GCS_BUCKET_NAME: ${{ env.GCS_BUCKET_NAME }}
-        GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}
+        # Note: GOOGLE_API_KEY is not needed as this script only reads from GCS.

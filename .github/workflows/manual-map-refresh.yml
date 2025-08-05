@@ -1,3 +1,4 @@
+#manual-map-refresh.yml
 name: Manual Map Data Refresh
 
 on:
