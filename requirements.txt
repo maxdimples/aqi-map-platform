@@ -1,5 +1,3 @@
-# requirements.txt
-
 # Core
 requests
 aiohttp
@@ -8,10 +6,10 @@ pandas
 # Google Cloud
 google-cloud-bigquery
 google-cloud-storage
-pandas-gbq          # <-- CRITICAL: Fixes the pyarrow/DataFrame loading error
+pandas-gbq
 db-dtypes
 
-# Geospatial (if needed for other scripts, retained for completeness)
+# Geospatial (if needed for other scripts)
 geopandas
 numpy
 shapely

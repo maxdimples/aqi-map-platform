@@ -1,15 +1,14 @@
-# .github/workflows/ingest.yml
-name: Monthly AQI Ingestion
+name: Weekly AQI Ingestion
 
 on:
   workflow_dispatch:
   schedule:
-    - cron: '0 5 1 * *'
+    # Runs at 05:00 UTC every Sunday. This is robust and consistent.
+    - cron: '0 5 * * SUN'
 
 env:
   GCP_PROJECT_ID: aqi-history-platform
-  GCS_BUCKET_NAME: aqi-history-platform
-  FIREBASE_ORIGIN: https://aqi-history.web.app # Your Firebase App URL
+  GCS_BUCKET_NAME: aqi-history-platform 
 
 jobs:
   ingest-and-process:
@@ -36,10 +35,9 @@ jobs:
     - name: Install Python Dependencies
       run: pip install -r requirements.txt
         
-    - name: Run Ingestion Engine
+    - name: Run Weekly Ingestion Engine
       run: python ingest_engine.py
       env:
         GCP_PROJECT_ID: ${{ env.GCP_PROJECT_ID }}
         GCS_BUCKET_NAME: ${{ env.GCS_BUCKET_NAME }}
-        FIREBASE_ORIGIN: ${{ env.FIREBASE_ORIGIN }}
         GOOGLE_API_KEY: ${{ secrets.GOOGLE_API_KEY }}

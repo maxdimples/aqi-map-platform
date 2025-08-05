@@ -23,21 +23,21 @@
         <select id="timeframe-select"></select>
     </div>
     <div>
-        <label for="aqi-filter">Max Median AQI:</label>
-        <input type="range" id="aqi-filter" min="0" max="200" value="200" step="10">
-        <span id="aqi-filter-value">200</span>
+        <label for="aqi-filter">Min Median AQI:</label>
+        <input type="range" id="aqi-filter" min="0" max="100" value="0" step="5">
+        <span id="aqi-filter-value">0</span>
     </div>
 </div>
 <div id="map"></div>
 
 <script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
 <script>
-    const GCS_BUCKET_NAME = "aqi-history-platform";
-    const DATA_URL = `https://storage.googleapis.com/${GCS_BUCKET_NAME}/map_data.json`;
+    const GCS_BUCKET_NAME = "aqi-history-platform"; // Use your actual GCS bucket name
+    const DATA_URL = `https://storage.googleapis.com/${GCS_BUCKET_NAME}/map_data.json?v=${new Date().getTime()}`;
     
     const map = L.map('map').setView([40.7128, -74.0060], 8);
     L.tileLayer('https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}{r}.png', {
-        attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors © <a href="https://carto.com/attributions">CARTO</a>'
+        attribution: '© OpenStreetMap contributors © CARTO'
     }).addTo(map);
 
     let mapData = null;
@@ -47,30 +47,32 @@
     const aqiFilter = document.getElementById('aqi-filter');
     const aqiFilterValue = document.getElementById('aqi-filter-value');
 
+    // UDAQI Scale: Higher is better.
     function getColor(aqi) {
         if (aqi === null || isNaN(aqi)) return '#999999'; // Grey for unknown
-        return aqi > 150 ? '#d73027' : aqi > 100 ? '#fc8d59' : aqi > 50 ? '#fee08b' : '#91cf60';
+        return aqi > 66 ? '#91cf60' : // Good
+               aqi > 33 ? '#fee08b' : // Moderate
+                          '#fc8d59'; // Unhealthy for Sensitive
     }
 
     function updateMapFromControls() {
         const selectedTimeframe = timeframeSelect.value;
-        const maxAqi = parseInt(aqiFilter.value, 10);
-        aqiFilterValue.textContent = maxAqi;
+        const minAqi = parseInt(aqiFilter.value, 10);
+        aqiFilterValue.textContent = minAqi;
 
         layerGroup.clearLayers();
         if (!mapData || !mapData.locations) return;
 
         mapData.locations.forEach(point => {
             if (!point.stats || !point.stats[selectedTimeframe]) {
-                return;
+                return; // Skip points with no data for this timeframe
             }
             
             const stats = point.stats[selectedTimeframe];
             const medianAqi = stats.median_aqi;
             
-            // The new filter logic: only show locations with good air quality
-            if (medianAqi === null || medianAqi > maxAqi) {
-                return;
+            if (medianAqi === null || medianAqi < minAqi) {
+                return; // Filter out points below the minimum AQI
             }
 
             const popupContent = `
@@ -102,6 +104,7 @@
         .then(data => {
             mapData = data;
             
+            // Dynamically populate timeframe dropdown
             data.timeframes.forEach(tf => {
                 const option = document.createElement('option');
                 option.value = tf;
@@ -112,13 +115,13 @@
             timeframeSelect.addEventListener('change', updateMapFromControls);
             aqiFilter.addEventListener('input', updateMapFromControls);
             
-            // Initial render
             if (data.timeframes.length > 0) {
+                timeframeSelect.value = "All Time"; // Default view
                 updateMapFromControls();
             }
         })
         .catch(error => {
-            console.error('Error loading or processing map data:', error);
+            console.error('Error loading map data:', error);
             document.getElementById('map').innerHTML = `<h2 style="text-align:center; color:red;">Failed to load map data. See console for details.</h2>`;
         });
 </script>
