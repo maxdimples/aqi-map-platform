@@ -2,7 +2,7 @@
 
 import asyncio
 import aiohttp
-from aiohttp_retry import RetryClient, ExponentialRetry # Import the retry library
+from aiohttp_retry import RetryClient, JitterRetry # <-- CORRECTED: Import JitterRetry
 import os
 import pandas as pd
 import json
@@ -133,16 +133,15 @@ def aggregate_and_publish():
     print(f"Upload complete. Map data is now live at: {blob.public_url}")
 
 async def main(args):
-    # --- CORRECTED: Set up the resilient retry client ---
-    retry_options = ExponentialRetry(
+    # --- CORRECTED: Use JitterRetry for randomized backoff ---
+    retry_options = JitterRetry(
         attempts=5,
-        start_timeout=1.0,
-        max_timeout=30.0,
+        start_timeout=1,
+        max_timeout=30,
         factor=2.0,
-        statuses=[429, 503, 504], # Retry on these specific server/rate-limit errors
-        random_interval=1.0 # CORRECT KEYWORD: Adds up to 1 second of random jitter
+        statuses=[429, 503, 504]
     )
-    retry_client = RetryClient(retry_options=retry_options, raise_for_status=False) # Let our code handle final errors
+    retry_client = RetryClient(retry_options=retry_options, raise_for_status=False)
 
     if not os.path.exists(LOCATIONS_FILE):
         print(f"FATAL: Locations file '{LOCATIONS_FILE}' not found."); return
