@@ -122,8 +122,6 @@ def aggregate_and_publish():
     ranked_table_id = f"`{GCP_PROJECT_ID}.{BQ_DATASET}.map_data_ranked`"
     
     # STEP 1: Calculate all stats and MERGE into the new ranked table.
-    # This is the heavy lifting. It's idempotent and robust.
-    # It calculates key percentiles and the lexicographic sort_key.
     merge_query = f"""
         MERGE {ranked_table_id} T
         USING (
@@ -146,7 +144,8 @@ def aggregate_and_publish():
 
               -- Monthly Stats
               SELECT
-                FORMAT_TIMESTAMP('%Y-%m (%B)', datetime) AS timeframe, latitude, longitude,
+                FORMAT_TIMESTAMP('%Y-%m (%B)', DATETIME_TRUNC(datetime, MONTH)) AS timeframe,
+                latitude, longitude,
                 ST_GEOHASH(ST_GEOGPOINT(longitude, latitude), 7) as geohash,
                 APPROX_QUANTILES(CAST(aqi AS INT64), 100)[OFFSET(50)] AS p50_aqi,
                 APPROX_QUANTILES(CAST(aqi AS INT64), 100)[OFFSET(10)] AS p10_aqi,
@@ -161,23 +160,25 @@ def aggregate_and_publish():
             -- Final selection and sort key calculation
             SELECT
               *,
+              -- CORRECTED SYNTAX: The CAST function's type declaration (AS INT64) is now INSIDE the parentheses.
               CAST(
-                 COALESCE(p50_aqi, 0) * 100000000 +
+                 (COALESCE(p50_aqi, 0) * 100000000 +
                  COALESCE(p10_aqi, 0) * 1000000 +
                  COALESCE(p01_aqi, 0) * 10000 +
                  ROUND(COALESCE(avg_aqi, 0)) * 100 +
-                 LEAST(COALESCE(point_count, 0), 99)
-              ) AS INT64 AS sort_key
+                 LEAST(COALESCE(point_count, 0), 99))
+              AS INT64) AS sort_key
             FROM all_stats
         ) S
         ON T.latitude = S.latitude AND T.longitude = S.longitude AND T.timeframe = S.timeframe
         WHEN MATCHED THEN
           UPDATE SET
             p50_aqi = S.p50_aqi, p10_aqi = S.p10_aqi, p01_aqi = S.p01_aqi, avg_aqi = S.avg_aqi,
-            share_ge80 = S.share_ge80, point_count = S.point_count, sort_key = S.sort_key
+            share_ge80 = S.share_ge80, point_count = S.point_count, sort_key = S.sort_key, geohash = S.geohash
         WHEN NOT MATCHED THEN
+          -- CORRECTED INSERT: Explicitly use the source alias 'S' for all columns to prevent ambiguity.
           INSERT (timeframe, latitude, longitude, geohash, p50_aqi, p10_aqi, p01_aqi, avg_aqi, share_ge80, point_count, sort_key)
-          VALUES (timeframe, latitude, longitude, geohash, p50_aqi, p10_aqi, p01_aqi, S.avg_aqi, S.share_ge80, S.point_count, S.sort_key)
+          VALUES (S.timeframe, S.latitude, S.longitude, S.geohash, S.p50_aqi, S.p10_aqi, S.p01_aqi, S.avg_aqi, S.share_ge80, S.point_count, S.sort_key)
     """
     print("Executing MERGE to update ranked data table...")
     merge_job = client.query(merge_query)
@@ -185,19 +186,16 @@ def aggregate_and_publish():
     print(f"Ranked data table '{ranked_table_id}' is now up-to-date.")
 
     # STEP 2: Generate the JSON from the new, optimized table.
-    # This query is now extremely fast as the hard work is already done.
     print("Querying the ranked table to generate final JSON...")
     results_df = client.query(f"SELECT * FROM {ranked_table_id} ORDER BY sort_key DESC").to_dataframe()
 
     # Efficiently structure the DataFrame into the nested JSON format
-    all_timeframes = sorted(results_df['timeframe'].unique().tolist())
+    all_timeframes = sorted(list(results_df['timeframe'].unique()))
     
     def format_stats(group):
-        # Round floats for cleaner JSON output
         group['avg_aqi'] = group['avg_aqi'].round(2)
         group['share_ge80'] = group['share_ge80'].round(4)
         group.set_index('timeframe', inplace=True)
-        # Drop geohash as it's not needed in the final JSON
         return group.drop(columns=['latitude', 'longitude', 'geohash']).to_dict('index')
 
     locations_series = results_df.groupby(['latitude', 'longitude']).apply(format_stats)
