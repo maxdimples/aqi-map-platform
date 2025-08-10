@@ -9,13 +9,13 @@
         body { margin: 0; padding: 0; font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; display: flex; flex-direction: column; height: 100vh; }
         #map { flex-grow: 1; background-color: #f0f0f0; }
         #controls { background: #fff; padding: 10px; box-shadow: 0 2px 6px rgba(0,0,0,0.3); z-index: 1000; display: flex; justify-content: center; align-items: center; gap: 20px; flex-wrap: wrap; }
-        .leaflet-popup-content { width: 250px !important; }
+        .leaflet-popup-content { width: 280px !important; }
         .popup-line { margin: 2px 0; font-size: 14px; }
         select, input { font-size: 16px; padding: 5px; }
         hr { border: 0; border-top: 1px solid #ddd; margin: 5px 0; }
-        .aqi-filter-group input[type="number"] { width: 65px; }
-        
-        /* Styles for the new Pinning Controls */
+        .ranking-filter-group { display: flex; align-items: center; gap: 10px; }
+        .ranking-filter-group input[type="range"] { width: 120px; }
+        .ranking-filter-group #ranking-value { font-weight: bold; min-width: 30px; text-align: right; }
         #pin-controls { border-left: 2px solid #eee; padding-left: 20px; }
         #pin-controls input[type="text"] { width: 140px; }
         #pin-controls button { padding: 5px 12px; cursor: pointer; background-color: #007bff; color: white; border: none; border-radius: 4px; }
@@ -29,15 +29,12 @@
         <label for="timeframe-select">Timeframe:</label>
         <select id="timeframe-select"></select>
     </div>
-    <div class="aqi-filter-group">
-        <label>Median AQI Range:</label>
-        <input type="number" id="min-aqi-input" min="0" max="150" value="0" step="0.01">
-        <input type="range" id="min-aqi-slider" min="0" max="150" value="0" step="0.01">
-        <span>-</span>
-        <input type="range" id="max-aqi-slider" min="0" max="150" value="150" step="0.01">
-        <input type="number" id="max-aqi-input" min="0" max="150" value="150" step="0.01">
+    <div class="ranking-filter-group">
+        <label for="ranking-slider">Show Top:</label>
+        <!-- ACCESSIBILITY: Added aria-label for screen readers -->
+        <input type="range" id="ranking-slider" min="1" max="100" value="25" step="1" aria-label="Filter locations by top percentage ranking">
+        <span id="ranking-value">25</span>%
     </div>
-    <!-- New Pinning Controls -->
     <div id="pin-controls">
         <input type="text" id="coord-input" placeholder="e.g., 41.162, -74.942">
         <button id="add-pin-btn">Pin Location</button>
@@ -58,72 +55,73 @@
 
     let mapData = null;
     const aqiLayerGroup = L.layerGroup().addTo(map);
-    const pinsLayerGroup = L.layerGroup().addTo(map); // Separate layer for user pins
+    const pinsLayerGroup = L.layerGroup().addTo(map);
 
-    // Control Elements
     const timeframeSelect = document.getElementById('timeframe-select');
-    const minAqiSlider = document.getElementById('min-aqi-slider');
-    const maxAqiSlider = document.getElementById('max-aqi-slider');
-    const minAqiInput = document.getElementById('min-aqi-input');
-    const maxAqiInput = document.getElementById('max-aqi-input');
+    const rankingSlider = document.getElementById('ranking-slider');
+    const rankingValue = document.getElementById('ranking-value');
     const coordInput = document.getElementById('coord-input');
     const addPinBtn = document.getElementById('add-pin-btn');
     const clearPinsBtn = document.getElementById('clear-pins-btn');
 
-    function getGradientColor(aqi, minAqi, maxAqi) {
+    // CORRECTED: Color scale now correctly maps high uAQI (good) to Green and low uAQI (bad) to Red.
+    function getGradientColor(aqi) {
         if (aqi === null || isNaN(aqi)) return '#999999';
-        if (maxAqi === minAqi) return '#ffc300'; 
-        const percentage = (aqi - minAqi) / (maxAqi - minAqi);
-        let red, green, blue;
-        if (percentage < 0.5) {
-            const p = percentage * 2;
-            red = 220 + (255 - 220) * p; green = 60 + (195 - 60) * p; blue = 50 + (0 - 50) * p;
-        } else {
-            const p = (percentage - 0.5) * 2;
-            red = 255 + (60 - 255) * p; green = 195 + (180 - 195) * p; blue = 0 + (75 - 0) * p;
+        const percentage = Math.max(0, Math.min(1, aqi / 100));
+        let red, green;
+        if (percentage < 0.5) { // Red -> Yellow
+            red = 255; green = Math.round(255 * (percentage * 2));
+        } else { // Yellow -> Green
+            green = 255; red = Math.round(255 * (1 - (percentage - 0.5) * 2));
         }
-        return `rgb(${Math.round(red)},${Math.round(green)},${Math.round(blue)})`;
+        return `rgb(${red},${green},0)`;
     }
     
     function formatValue(value, decimals = 2) {
         if (value === null || typeof value === 'undefined') return 'N/A';
+        if (decimals === -1) { return `${(value * 100).toFixed(2)}%`; }
         return value.toFixed(decimals);
     }
 
     function updateMap() {
         const selectedTimeframe = timeframeSelect.value;
-        const minAqiFilter = parseFloat(minAqiInput.value);
-        const maxAqiFilter = parseFloat(maxAqiInput.value);
+        const topPercent = parseInt(rankingSlider.value, 10);
 
         aqiLayerGroup.clearLayers();
         if (!mapData || !mapData.locations) return;
 
-        const aqiValues = mapData.locations
-            .map(point => point.stats[selectedTimeframe]?.median_aqi)
-            .filter(aqi => aqi !== null && !isNaN(aqi));
-        
-        const globalMinAqi = aqiValues.length > 0 ? Math.min(...aqiValues) : 0;
-        const globalMaxAqi = aqiValues.length > 0 ? Math.max(...aqiValues) : 150;
+        const validLocations = mapData.locations.filter(point => point.stats && point.stats[selectedTimeframe]);
 
-        mapData.locations.forEach(point => {
-            if (!point.stats || !point.stats[selectedTimeframe]) return;
+        const sortedLocations = validLocations.sort((a, b) => {
+            const statsA = a.stats[selectedTimeframe];
+            const statsB = b.stats[selectedTimeframe];
+            return (statsB.sort_key || 0) - (statsA.sort_key || 0);
+        });
+
+        const countToShow = Math.ceil(sortedLocations.length * (topPercent / 100));
+        const locationsToDisplay = sortedLocations.slice(0, countToShow);
+
+        locationsToDisplay.forEach(point => {
             const stats = point.stats[selectedTimeframe];
-            const medianAqi = stats.median_aqi;
+            // CORRECTED: Field name consistency check. All JS now uses the `_aqi` suffix.
+            const p50_aqi = stats.p50_aqi;
             
-            if (medianAqi === null || medianAqi < minAqiFilter || medianAqi > maxAqiFilter) return;
-
             const googleMapsLink = `https://www.google.com/maps?q=${point.latitude},${point.longitude}`;
             const popupContent = `
-                <b>Location:</b> <a href="${googleMapsLink}" target="_blank">(${point.latitude.toFixed(6)}, ${point.longitude.toFixed(6)})</a><hr>
+                <b>Location:</b> <a href="${googleMapsLink}" target="_blank">(${point.latitude.toFixed(4)}, ${point.longitude.toFixed(4)})</a><hr>
                 <b>Timeframe: ${selectedTimeframe}</b>
-                <div class="popup-line"><b>Median AQI (Typical):</b> ${formatValue(stats.median_aqi, 2)}</div>
-                <div class="popup-line"><b>Average AQI (Total):</b> ${formatValue(stats.avg_aqi, 2)}</div>
-                <div class="popup-line"><b>Min/Max AQI:</b> ${formatValue(stats.min_aqi, 2)} / ${formatValue(stats.max_aqi, 2)}</div>
-                <div class="popup-line"><b>Data Points:</b> ${stats.point_count ?? 'N/A'}</div>`;
+                <div class="popup-line"><b>p50 AQI (Typical Day):</b> ${formatValue(stats.p50_aqi, 0)}</div>
+                <div class="popup-line"><b>p10 AQI (Bad Day Floor):</b> ${formatValue(stats.p10_aqi, 0)}</div>
+                <div class="popup-line"><b>p01 AQI (Worst Day):</b> ${formatValue(stats.p01_aqi, 0)}</div>
+                <hr>
+                <div class="popup-line"><b>Average AQI:</b> ${formatValue(stats.avg_aqi, 2)}</div>
+                <div class="popup-line"><b>% Hours 'Excellent':</b> ${formatValue(stats.share_ge80, -1)}</div>
+                <div class="popup-line"><b>Data Points:</b> ${stats.point_count ?? 'N/A'}</div>
+                <div class="popup-line"><i>Sort Key: ${stats.sort_key ?? 'N/A'}</i></div>`;
 
             L.circleMarker([point.latitude, point.longitude], {
                 radius: 4, 
-                fillColor: getGradientColor(medianAqi, globalMinAqi, globalMaxAqi),
+                fillColor: getGradientColor(p50_aqi),
                 color: "#000", weight: 0.5, opacity: 1, fillOpacity: 0.8
             }).bindPopup(popupContent).addTo(aqiLayerGroup);
         });
@@ -133,72 +131,46 @@
         .then(response => response.json())
         .then(data => {
             mapData = data;
+            timeframeSelect.innerHTML = '';
             data.timeframes.forEach(tf => {
                 const option = document.createElement('option');
                 option.value = tf; option.textContent = tf;
                 timeframeSelect.appendChild(option);
             });
             if (data.timeframes.includes("All Time")) timeframeSelect.value = "All Time";
-            setupEventListeners();
+            
+            if (!document.getElementById('event-listeners-attached')) {
+                setupEventListeners();
+                const marker = document.createElement('div');
+                marker.id = 'event-listeners-attached';
+                marker.style.display = 'none';
+                document.body.appendChild(marker);
+            }
             updateMap();
         })
         .catch(error => console.error('Error loading map data:', error));
 
     function setupEventListeners() {
         timeframeSelect.addEventListener('change', updateMap);
-        minAqiSlider.addEventListener('input', (e) => {
-            const minValue = parseFloat(e.target.value), maxValue = parseFloat(maxAqiSlider.value);
-            minAqiInput.value = formatValue(minValue);
-            if (minValue > maxValue) { maxAqiSlider.value = minValue; maxAqiInput.value = formatValue(minValue); }
-            updateMap();
-        });
-        maxAqiSlider.addEventListener('input', (e) => {
-            const maxValue = parseFloat(e.target.value), minValue = parseFloat(minAqiSlider.value);
-            maxAqiInput.value = formatValue(maxValue);
-            if (maxValue < minValue) { minAqiSlider.value = maxValue; minAqiInput.value = formatValue(maxValue); }
-            updateMap();
-        });
-        minAqiInput.addEventListener('change', (e) => {
-            let value = parseFloat(e.target.value), max = parseFloat(maxAqiInput.value);
-            if (isNaN(value)) value = 0; if (value > max) value = max;
-            e.target.value = formatValue(value); minAqiSlider.value = value;
-            updateMap();
-        });
-        maxAqiInput.addEventListener('change', (e) => {
-            let value = parseFloat(e.target.value), min = parseFloat(minAqiInput.value);
-            if (isNaN(value)) value = 150; if (value < min) value = min;
-            e.target.value = formatValue(value); maxAqiSlider.value = value;
+        rankingSlider.addEventListener('input', (e) => {
+            rankingValue.textContent = e.target.value;
             updateMap();
         });
 
-        // --- PINNING LOGIC ---
         addPinBtn.addEventListener('click', () => {
             const parts = coordInput.value.split(',').map(s => s.trim());
             if (parts.length !== 2) { alert('Please enter coordinates as "latitude, longitude"'); return; }
-            
-            const lat = parseFloat(parts[0]);
-            const lng = parseFloat(parts[1]);
-
+            const lat = parseFloat(parts[0]), lng = parseFloat(parts[1]);
             if (isNaN(lat) || isNaN(lng) || lat < -90 || lat > 90 || lng < -180 || lng > 180) {
-                alert('Invalid coordinates. Please check the values.'); return;
+                alert('Invalid coordinates.'); return;
             }
-
-            L.marker([lat, lng]).addTo(pinsLayerGroup)
-                .bindPopup(`Pinned Location:<br>${lat}, ${lng}`)
-                .openPopup();
-            
-            map.setView([lat, lng], 12); // Center map on the new pin
-            coordInput.value = ''; // Clear input for next pin
+            L.marker([lat, lng]).addTo(pinsLayerGroup).bindPopup(`Pinned Location:<br>${lat}, ${lng}`).openPopup();
+            map.setView([lat, lng], 12);
+            coordInput.value = '';
         });
 
-        clearPinsBtn.addEventListener('click', () => {
-            pinsLayerGroup.clearLayers();
-        });
-
-        // Allow pressing Enter to add a pin
-        coordInput.addEventListener('keypress', (e) => {
-            if (e.key === 'Enter') addPinBtn.click();
-        });
+        clearPinsBtn.addEventListener('click', () => { pinsLayerGroup.clearLayers(); });
+        coordInput.addEventListener('keypress', (e) => { if (e.key === 'Enter') addPinBtn.click(); });
     }
 </script>
 </body>
