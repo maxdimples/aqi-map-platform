@@ -5,7 +5,9 @@ import argparse
 import json
 import pandas as pd
 from google.cloud import storage, bigquery
-from ingest_engine import load_to_bigquery, BQ_DATASET, BQ_TABLE, GCP_PROJECT_ID
+from ingest_engine import (
+    load_to_bigquery, aggregate_and_publish, BQ_DATASET, BQ_TABLE, GCP_PROJECT_ID
+)
 
 def parse_response(data, lat, lon):
     """Parses a raw JSON response dictionary into BigQuery-ready records."""
@@ -64,6 +66,8 @@ async def main(args):
     
     if all_records:
         load_to_bigquery(all_records, bq_client)
+        print("\n--- Triggering Final Aggregation Step ---")
+        aggregate_and_publish()
     else:
         print("No valid records found to load into BigQuery.")
         

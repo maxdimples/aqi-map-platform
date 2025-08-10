@@ -116,59 +116,104 @@ def load_to_bigquery(records, bq_client):
     print(f"Successfully merged {merge_job.num_dml_affected_rows} new rows. Temp table deleted.")
 
 def aggregate_and_publish():
-    print("--- Aggregating All Data for Map (Full Precision) ---")
+    print("--- Aggregating, Ranking, and Publishing Map Data ---")
     client = bigquery.Client(project=GCP_PROJECT_ID)
+    raw_table_id = f"`{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}`"
+    ranked_table_id = f"`{GCP_PROJECT_ID}.{BQ_DATASET}.map_data_ranked`"
     
-    query = f"""
-        WITH all_time_stats AS (
-            SELECT 
+    # STEP 1: Calculate all stats and MERGE into the new ranked table.
+    # This is the heavy lifting. It's idempotent and robust.
+    # It calculates key percentiles and the lexicographic sort_key.
+    merge_query = f"""
+        MERGE {ranked_table_id} T
+        USING (
+            WITH all_stats AS (
+              -- All Time Stats
+              SELECT
                 'All Time' AS timeframe, latitude, longitude,
-                ROUND(APPROX_QUANTILES(CAST(aqi AS FLOAT64), 2)[OFFSET(1)], 2) AS median_aqi,
-                ROUND(AVG(CAST(aqi AS FLOAT64)), 2) AS avg_aqi,
-                CAST(MAX(aqi) AS FLOAT64) AS max_aqi,
-                CAST(MIN(aqi) AS FLOAT64) AS min_aqi,
+                ST_GEOHASH(ST_GEOGPOINT(longitude, latitude), 7) as geohash,
+                APPROX_QUANTILES(CAST(aqi AS INT64), 100)[OFFSET(50)] AS p50_aqi,
+                APPROX_QUANTILES(CAST(aqi AS INT64), 100)[OFFSET(10)] AS p10_aqi,
+                APPROX_QUANTILES(CAST(aqi AS INT64), 100)[OFFSET(1)]  AS p01_aqi,
+                AVG(CAST(aqi AS FLOAT64)) AS avg_aqi,
+                SAFE_DIVIDE(COUNTIF(aqi >= 80), COUNTIF(aqi IS NOT NULL)) AS share_ge80,
                 COUNTIF(aqi IS NOT NULL) AS point_count
-            FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}` WHERE latitude IS NOT NULL GROUP BY latitude, longitude
-        ),
-        month_stats AS (
-            SELECT 
+              FROM {raw_table_id}
+              WHERE latitude IS NOT NULL AND longitude IS NOT NULL AND aqi IS NOT NULL
+              GROUP BY latitude, longitude
+
+              UNION ALL
+
+              -- Monthly Stats
+              SELECT
                 FORMAT_TIMESTAMP('%Y-%m (%B)', datetime) AS timeframe, latitude, longitude,
-                ROUND(APPROX_QUANTILES(CAST(aqi AS FLOAT64), 2)[OFFSET(1)], 2) AS median_aqi,
-                ROUND(AVG(CAST(aqi AS FLOAT64)), 2) AS avg_aqi,
-                CAST(MAX(aqi) AS FLOAT64) AS max_aqi,
-                CAST(MIN(aqi) AS FLOAT64) AS min_aqi,
+                ST_GEOHASH(ST_GEOGPOINT(longitude, latitude), 7) as geohash,
+                APPROX_QUANTILES(CAST(aqi AS INT64), 100)[OFFSET(50)] AS p50_aqi,
+                APPROX_QUANTILES(CAST(aqi AS INT64), 100)[OFFSET(10)] AS p10_aqi,
+                APPROX_QUANTILES(CAST(aqi AS INT64), 100)[OFFSET(1)]  AS p01_aqi,
+                AVG(CAST(aqi AS FLOAT64)) AS avg_aqi,
+                SAFE_DIVIDE(COUNTIF(aqi >= 80), COUNTIF(aqi IS NOT NULL)) AS share_ge80,
                 COUNTIF(aqi IS NOT NULL) AS point_count
-            FROM `{GCP_PROJECT_ID}.{BQ_DATASET}.{BQ_TABLE}` WHERE latitude IS NOT NULL GROUP BY timeframe, latitude, longitude
-        )
-        SELECT * FROM all_time_stats UNION ALL SELECT * FROM month_stats
+              FROM {raw_table_id}
+              WHERE latitude IS NOT NULL AND longitude IS NOT NULL AND aqi IS NOT NULL
+              GROUP BY timeframe, latitude, longitude
+            )
+            -- Final selection and sort key calculation
+            SELECT
+              *,
+              CAST(
+                 COALESCE(p50_aqi, 0) * 100000000 +
+                 COALESCE(p10_aqi, 0) * 1000000 +
+                 COALESCE(p01_aqi, 0) * 10000 +
+                 ROUND(COALESCE(avg_aqi, 0)) * 100 +
+                 LEAST(COALESCE(point_count, 0), 99)
+              ) AS INT64 AS sort_key
+            FROM all_stats
+        ) S
+        ON T.latitude = S.latitude AND T.longitude = S.longitude AND T.timeframe = S.timeframe
+        WHEN MATCHED THEN
+          UPDATE SET
+            p50_aqi = S.p50_aqi, p10_aqi = S.p10_aqi, p01_aqi = S.p01_aqi, avg_aqi = S.avg_aqi,
+            share_ge80 = S.share_ge80, point_count = S.point_count, sort_key = S.sort_key
+        WHEN NOT MATCHED THEN
+          INSERT (timeframe, latitude, longitude, geohash, p50_aqi, p10_aqi, p01_aqi, avg_aqi, share_ge80, point_count, sort_key)
+          VALUES (timeframe, latitude, longitude, geohash, p50_aqi, p10_aqi, p01_aqi, S.avg_aqi, S.share_ge80, S.point_count, S.sort_key)
     """
-    print("Executing float-precision aggregation query...")
-    results_df = client.query(query).to_dataframe()
+    print("Executing MERGE to update ranked data table...")
+    merge_job = client.query(merge_query)
+    merge_job.result()
+    print(f"Ranked data table '{ranked_table_id}' is now up-to-date.")
+
+    # STEP 2: Generate the JSON from the new, optimized table.
+    # This query is now extremely fast as the hard work is already done.
+    print("Querying the ranked table to generate final JSON...")
+    results_df = client.query(f"SELECT * FROM {ranked_table_id} ORDER BY sort_key DESC").to_dataframe()
+
+    # Efficiently structure the DataFrame into the nested JSON format
+    all_timeframes = sorted(results_df['timeframe'].unique().tolist())
     
-    locations_dict, all_timeframes = {}, set()
-    for _, row in results_df.iterrows():
-        lat, lon = row["latitude"], row["longitude"]
-        key = (lat, lon)
-        if key not in locations_dict: locations_dict[key] = {"latitude": lat, "longitude": lon, "stats": {}}
-        timeframe = row["timeframe"]
-        all_timeframes.add(timeframe)
+    def format_stats(group):
+        # Round floats for cleaner JSON output
+        group['avg_aqi'] = group['avg_aqi'].round(2)
+        group['share_ge80'] = group['share_ge80'].round(4)
+        group.set_index('timeframe', inplace=True)
+        # Drop geohash as it's not needed in the final JSON
+        return group.drop(columns=['latitude', 'longitude', 'geohash']).to_dict('index')
+
+    locations_series = results_df.groupby(['latitude', 'longitude']).apply(format_stats)
+    locations_list = [{"latitude": lat, "longitude": lon, "stats": stats} for (lat, lon), stats in locations_series.items()]
         
-        locations_dict[key]["stats"][timeframe] = { 
-            "median_aqi": None if pd.isna(row["median_aqi"]) else row["median_aqi"],
-            "avg_aqi": None if pd.isna(row["avg_aqi"]) else row["avg_aqi"],
-            "max_aqi": None if pd.isna(row["max_aqi"]) else row["max_aqi"], 
-            "min_aqi": None if pd.isna(row["min_aqi"]) else row["min_aqi"], 
-            "point_count": int(row["point_count"]) 
-        }
-        
-    final_json_payload = { "timeframes": sorted(list(all_timeframes)), "locations": list(locations_dict.values()) }
+    final_json_payload = {
+        "timeframes": all_timeframes,
+        "locations": locations_list
+    }
     
     bucket = storage_client.bucket(GCS_BUCKET_NAME)
     blob = bucket.blob("map_data.json")
     blob.cache_control = "no-cache"
     blob.upload_from_string(json.dumps(final_json_payload), content_type='application/json')
     blob.make_public()
-    print(f"Upload complete. Map data is now live at: {blob.public_url}")
+    print(f"Upload complete. Enriched map data is now live at: {blob.public_url}")
 
 async def main():
     print("--- Running in Staggered Weekly Ingestion Mode ---")
